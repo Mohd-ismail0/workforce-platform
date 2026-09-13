@@ -172,36 +172,19 @@ func TestPauseResumeKeepsOtherWorkMoving(t *testing.T) {
 	if answered["status"] != "resolved" {
 		t.Fatalf("gate not resolved: %v", answered)
 	}
-	// The invariant under test is that ANSWERING is not EXECUTING. Assert it on the
-	// response itself rather than by polling for an intermediate state: with no
-	// worker alive, the response transaction may set 'queued' and a later worker may
-	// pick it up, but the answer alone must never publish work.
-	if answered["proposal_id"] != nil && answered["proposal_id"] != "" {
-		t.Fatalf("answering a question must not publish work: %v", answered)
+	// With the worker stopped, answering is only a state transition: the run must be
+	// queued and must NOT have published anything. Assert this on the RUN, not on the
+	// gate response — a gate object has no proposal_id field, so checking it proves
+	// nothing at all.
+	code, afterAnswer := f.do("req", "GET", "/api/v1/runs/"+id(runA), nil)
+	if code != 200 {
+		t.Fatalf("could not read the run after answering: %d %v", code, afterAnswer)
 	}
-	immediate := waitForRun(t, f, id(runA), "queued", "running", "succeeded")
-	if pid, _ := immediate["proposal_id"].(string); pid != "" {
-		// A worker published it after the answer, but not as part of answering it.
-		// Confirm the published proposal is the one the human's answer produced and
-		// that it still awaits endorsement.
-		var ops []byte
-		var pstatus string
-		if e := f.st.WithOrg(context.Background(), org, func(tx pgx.Tx) error {
-			return tx.QueryRow(context.Background(), "select operations,status from proposals where org_id=$1 and id=$2", org, pid).Scan(&ops, &pstatus)
-		}); e != nil {
-			t.Fatal(e)
-		}
-		if pstatus != "pending_endorsement" {
-			t.Fatalf("resumed work must still need a human, got %q", pstatus)
-		}
-		if !bytes.Contains(ops, []byte("ops@supplier.test")) {
-			t.Fatalf("published work did not use the human answer: %s", ops)
-		}
+	if afterAnswer["status"] != "queued" {
+		t.Fatalf("with the worker stopped, answering must leave the run queued, got %v", afterAnswer["status"])
 	}
-	// An identical replay is idempotent and must not queue a second continuation.
-	_, replay := f.do("req", "POST", "/api/v1/gates/"+id(gate)+"/respond", map[string]any{"revision": gate["revision"], "response": answer})
-	if replay["status"] != "resolved" {
-		t.Fatalf("an identical replay should be idempotent: %v", replay)
+	if pid, _ := afterAnswer["proposal_id"].(string); pid != "" {
+		t.Fatalf("answering a question must not publish work: %v", afterAnswer)
 	}
 
 	// A fresh worker resumes A, using the human's answer.

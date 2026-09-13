@@ -147,18 +147,15 @@ func TestAnsweringTheGateResumesTheRunAndUsesTheAnswer(t *testing.T) {
 		t.Fatalf("gate status = %q, want resolved", resolved.Status)
 	}
 
-	// Answering is a state transition, not an execution. Assert the honest invariant
-	// rather than a transient status: a worker may legitimately pick the run up and
-	// move it past 'queued' between the answer and this read, but the answer alone
-	// must never publish work that skips review.
+	// Answering is a state transition, not an execution. This test drives the store
+	// directly with no worker running, so the run must sit in 'queued' and nothing
+	// may have been published: the answer alone never creates or authorises work.
 	mid, e := s.GetAgentRun(ctx, org, run.ID)
 	if e != nil {
 		t.Fatal(e)
 	}
-	switch mid.Status {
-	case "queued", "running", "succeeded":
-	default:
-		t.Fatalf("run status after answering = %q, want it queued or progressing", mid.Status)
+	if mid.Status != "queued" {
+		t.Fatalf("run status after answering = %q, want queued", mid.Status)
 	}
 	if mid.ProposalID != "" {
 		var pstatus string

@@ -36,6 +36,11 @@ This is a partial working platform foundation, not completion of the full build 
 - A `family`/`version` pair may only be released once per organization; retrying a failed release requires a new version. This is intentional but will need an explicit supersede path before real plugin updates.
 - No Gontext live adapter, object-store pipeline, org-wide assistant, Board Steward, full PM milestones, notification delivery, correction/evaluation pipeline or production restore certification yet.
 - Simulator schemas/test data only. Live providers, external network and real write credentials remain disabled.
+- **Real harness adapter is implemented but its model-driven path is UNVERIFIED.** `internal/runner` can launch any operator-configured command (`WORKFORCE_RUNNER_CLI_*`) as a separate process, hand it the run context on a documented JSON protocol, and turn its reply into a proposal. Verified through real subprocesses: process-group kill on timeout/cancel, output caps, environment isolation, missing-binary fail-closed, and rejection of run-scoped business keys. **No harness binary (claude/codex/opencode) is installed and no model credential is configured on this host, so no real agent run has been performed.** Activation requires an operator to install a harness and supply a credential through `WORKFORCE_RUNNER_CLI_<ID>_ENV`.
+- Harness output is untrusted input: it is validated again by `CreateProposal`, business-key reservation, endorsement and distinct approval. A harness cannot approve, execute or hold business credentials, and an approval never releases credentials to it.
+- A successful harness run means *preparation completed*, not business completion. The run is labelled as preparing a proposal; the effect happens only after human approval through the existing executor.
+- Recovery is eligibility, not scheduling: an expired claim becomes reclaimable, but no scheduler is guaranteed to retry it. The lease is now derived from the runner's own timeout budget (+60s, 2-minute floor) so a slow-but-healthy harness cannot outlive its lease.
+- Test suites share one database and River queue; isolation is achieved by running packages serially (`-p 1`), not by separate databases per suite.
 
 ## Evidence
 

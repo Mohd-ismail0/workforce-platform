@@ -136,17 +136,30 @@ func (s *Store) GetAgentRun(ctx context.Context, org, id string) (AgentRun, erro
 }
 func (s *Store) ExecuteAgentRun(ctx context.Context, org, id string) error {
 	tok := platform.NewID()
-	var task, aid, h, intent, release, owner, runnerID string
+	// initiator = who started this run. owner = who is accountable for the task.
+	// They differ whenever an admin starts a run on someone else's task, so the two
+	// must never share a variable: conflating them would question the wrong person
+	// and check the wrong principal for revocation.
+	var task, aid, h, intent, release, initiator, runnerID, owner string
 	var recs []runner.RecordRef
 	var inputs []runner.Input
 	e := s.WithOrg(ctx, org, func(tx pgx.Tx) error {
 		var attempt int
+		// The lease must exceed the longest run this runner is allowed to take.
+		// A fixed short lease would let a healthy-but-slow harness outlive its own
+		// lease and be reclaimed mid-run, publishing the same work twice.
+		var configured string
+		_ = tx.QueryRow(ctx, "select runner_id from agent_runs where org_id=$1 and id=$2", org, id).Scan(&configured)
+		leaseSeconds := int64(runner.RunBudget(configured).Seconds()) + 60
+		if leaseSeconds < 120 {
+			leaseSeconds = 120
+		}
 		// Claim is a LEASE, not a flag. A worker that dies after claiming would
 		// otherwise strand the run forever, because a bare 'queued' claim can never
 		// pick up a run already marked 'running'. Reclaiming an expired lease is
 		// safe because every publication path re-checks claim_token: the previous
 		// holder's token is now stale, so it cannot publish or record failure.
-		return tx.QueryRow(ctx, "update agent_runs set status='running',attempt=attempt+1,claim_token=$3,claim_expires_at=clock_timestamp()+interval '2 minutes',started_at=coalesce(started_at,clock_timestamp()) where org_id=$1 and id=$2 and (status='queued' or (status='running' and (claim_expires_at is null or claim_expires_at < clock_timestamp()))) returning task_id,agent_id,harness,intent,created_by,coalesce(harness_release_id,''),runner_id,attempt", org, id, tok).Scan(&task, &aid, &h, &intent, &owner, &release, &runnerID, &attempt)
+		return tx.QueryRow(ctx, "update agent_runs set status='running',attempt=attempt+1,claim_token=$3,claim_expires_at=clock_timestamp()+($4::bigint * interval '1 second'),started_at=coalesce(started_at,clock_timestamp()) where org_id=$1 and id=$2 and (status='queued' or (status='running' and (claim_expires_at is null or claim_expires_at < clock_timestamp()))) returning task_id,agent_id,harness,intent,created_by,coalesce(harness_release_id,''),runner_id,attempt", org, id, tok, leaseSeconds).Scan(&task, &aid, &h, &intent, &initiator, &release, &runnerID, &attempt)
 	})
 	if errors.Is(e, pgx.ErrNoRows) {
 		return nil
@@ -189,7 +202,10 @@ func (s *Store) ExecuteAgentRun(ctx context.Context, org, id string) error {
 				}
 			}
 		}
-		return rows.Err()
+		if e := rows.Err(); e != nil {
+			return e
+		}
+		return tx.QueryRow(ctx, "select owner_id from tasks where org_id=$1 and id=$2", org, task).Scan(&owner)
 	})
 	if e != nil {
 		return s.failRun(ctx, org, id, tok, "internal_error")
@@ -217,7 +233,7 @@ func (s *Store) ExecuteAgentRun(ctx context.Context, org, id string) error {
 			if len(tag) == 0 {
 				tag = []byte(`{}`)
 			}
-			q, e := tx.Exec(ctx, "insert into decision_gates(id,org_id,task_id,run_id,kind,prompt,input_schema,respondent_id,created_by) values($1,$2,$3,$4,$5,$6,$7,$8,$9) on conflict do nothing", gid, org, task, id, res.Gate.Kind, res.Gate.Prompt, tag, rid, owner)
+			q, e := tx.Exec(ctx, "insert into decision_gates(id,org_id,task_id,run_id,kind,prompt,input_schema,respondent_id,created_by) values($1,$2,$3,$4,$5,$6,$7,$8,$9) on conflict do nothing", gid, org, task, id, res.Gate.Kind, res.Gate.Prompt, tag, rid, initiator)
 			if e != nil {
 				return e
 			}
@@ -245,7 +261,7 @@ func (s *Store) ExecuteAgentRun(ctx context.Context, org, id string) error {
 		if e := tx.QueryRow(ctx, "select status from agent_runs where org_id=$1 and id=$2 and claim_token=$3 for update", org, id, tok).Scan(&st); e != nil || st != "running" {
 			return nil
 		}
-		if e := tx.QueryRow(ctx, "select status,owner_id from tasks where org_id=$1 and id=$2", org, task).Scan(&ts, &owner); e != nil {
+		if e := tx.QueryRow(ctx, "select status from tasks where org_id=$1 and id=$2", org, task).Scan(&ts); e != nil {
 			return e
 		}
 		// A terminal task is a recorded outcome, not a retryable error. Returning a
@@ -257,10 +273,14 @@ func (s *Store) ExecuteAgentRun(ctx context.Context, org, id string) error {
 		if e := tx.QueryRow(ctx, "select state from registry_releases where org_id=$1 and id=$2", org, release).Scan(&rs); e != nil || rs != "active" {
 			return s.updateFailureTx(ctx, tx, org, id, tok, "internal_error")
 		}
-		var active bool
-		var role string
-		if e := tx.QueryRow(ctx, "select active,role from principals where org_id=$1 and id=$2", org, owner).Scan(&active, &role); e != nil || !active {
-			return s.updateFailureTx(ctx, tx, org, id, tok, "internal_error")
+		// Both the accountable owner and the initiator must still be active:
+		// ownership may have moved and the initiator may have been revoked.
+		for _, who := range []string{owner, initiator} {
+			var active bool
+			var role string
+			if e := tx.QueryRow(ctx, "select active,role from principals where org_id=$1 and id=$2", org, who).Scan(&active, &role); e != nil || !active {
+				return s.updateFailureTx(ctx, tx, org, id, tok, "actor_revoked")
+			}
 		}
 		p, e := s.createProposalTx(ctx, tx, org, task, owner, summary+" (agent run "+id+")", "agent_run", id, res.Draft.Operations)
 		if e != nil {

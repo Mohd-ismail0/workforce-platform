@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"workforce.local/platform/internal/connectors"
 )
@@ -18,6 +19,9 @@ type Manifest struct {
 	Simulation    bool     `json:"simulation"`
 	Capabilities  []string `json:"capabilities"`
 	MaxOperations int      `json:"max_operations"`
+	// Command is the configured binary NAME only, for display/diagnostics.
+	// Full arguments are never exposed so a task cannot learn or alter them.
+	Command string `json:"command,omitempty"`
 }
 
 // Input is a single human answer already collected for this run, keyed by the field
@@ -102,12 +106,35 @@ func New(id string) (Runner, error) {
 	if id == "simulator" {
 		return simulatorRunner{}, nil
 	}
+	for _, c := range cliConfigs() {
+		if c.id == id {
+			return c, nil
+		}
+	}
 	return nil, fmt.Errorf("unknown runner %q", id)
+}
+
+// RunBudget reports the longest wall-clock time the named runner may take for a
+// single attempt. The store derives the claim lease from this, so a slow but
+// healthy harness can never outlive its own lease and be reclaimed mid-run.
+func RunBudget(id string) time.Duration {
+	for _, c := range cliConfigs() {
+		if c.id == id {
+			return c.timeout
+		}
+	}
+	return 30 * time.Second
 }
 
 // Available lists the runners this binary can actually execute. Registration of a
 // harness release does not add an entry here.
-func Available() []Manifest { return []Manifest{simulatorRunner{}.Manifest()} }
+func Available() []Manifest {
+	out := []Manifest{simulatorRunner{}.Manifest()}
+	for _, c := range cliConfigs() {
+		out = append(out, c.Manifest())
+	}
+	return out
+}
 
 func Default() Runner { return simulatorRunner{} }
 
