@@ -2,6 +2,8 @@ package runner
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -80,7 +82,7 @@ func (s simulatorRunner) Run(ctx context.Context, req Request) (Result, error) {
 		Summary: "Prepared " + integration + " proposal",
 		Draft: &ProposalDraft{
 			Summary:    "Prepared " + integration + " proposal",
-			Operations: []connectors.Operation{draftOp(integration, action, *target, req.RunID, payload)},
+			Operations: []connectors.Operation{draftOp(integration, action, *target, payload)},
 		},
 	}, nil
 }
@@ -126,7 +128,7 @@ func (s simulatorRunner) clarify(req Request) (Result, error) {
 		Summary: "Prepared supplier follow-up using the supplied details",
 		Draft: &ProposalDraft{
 			Summary:    "Prepared supplier follow-up for " + email,
-			Operations: []connectors.Operation{draftOp("mail", "send", *target, req.RunID, payload)},
+			Operations: []connectors.Operation{draftOp("mail", "send", *target, payload)},
 		},
 	}, nil
 }
@@ -140,12 +142,22 @@ func firstRecord(records []RecordRef, integration string) *RecordRef {
 	return nil
 }
 
-// draftOp always carries a stable business key so the reservation layer can prove the
-// same official operation is never prepared twice for the same run and target.
-func draftOp(integration, action string, target RecordRef, runID string, payload json.RawMessage) connectors.Operation {
+// draftOp carries a key that identifies the REAL operation (integration, action,
+// target, the exact revision being changed, and the content) and never the run that
+// proposed it. A run-scoped key would let two independent runs each reserve their own
+// key for the same real operation and both be applied, defeating duplicate detection.
+func draftOp(integration, action string, target RecordRef, payload json.RawMessage) connectors.Operation {
 	return connectors.Operation{
 		Integration: integration, Action: action, TargetID: target.ID,
 		ExpectedVersion: target.Version, Payload: payload,
-		BusinessKey: "run:" + runID + ":" + target.ID,
+		BusinessKey: businessFactKey(integration, action, target.ID, target.Version, payload),
 	}
+}
+
+// businessFactKey is stable across runs and changes only when the real operation does:
+// a different target, a different revision of that target, or different content. Two
+// runs proposing the same change to the same revision therefore collide by design.
+func businessFactKey(integration, action, targetID string, version int, payload json.RawMessage) string {
+	sum := sha256.Sum256(payload)
+	return fmt.Sprintf("%s:%s:%s:%d:%s", integration, action, targetID, version, hex.EncodeToString(sum[:])[:16])
 }

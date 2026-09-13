@@ -65,8 +65,14 @@ func TestInventoryIntentTargetsScopedRecordAndCarriesBusinessKey(t *testing.T) {
 		if op.ExpectedVersion != 3 {
 			t.Fatalf("intent %q: expected_version = %d, want the scoped record version 3", intent, op.ExpectedVersion)
 		}
-		if op.BusinessKey != "run:run-1:inv-1" {
-			t.Fatalf("intent %q: business_key = %q", intent, op.BusinessKey)
+		// The key must identify the real operation, never the run: a run-scoped key
+		// would let two independent runs each reserve their own key for the same real
+		// operation and both be applied.
+		if strings.Contains(op.BusinessKey, "run-1") {
+			t.Fatalf("intent %q: business_key must not be run-scoped: %q", intent, op.BusinessKey)
+		}
+		if !strings.HasPrefix(op.BusinessKey, "inventory:adjust:inv-1:3:") {
+			t.Fatalf("intent %q: unexpected business_key %q", intent, op.BusinessKey)
 		}
 	}
 }
@@ -247,5 +253,31 @@ func TestInputsAreAddressableByName(t *testing.T) {
 	}
 	if _, ok := req.Answer("missing"); ok {
 		t.Fatal("an unasked field must not resolve")
+	}
+}
+
+// TestBusinessFactKeyIsStableAcrossRuns pins the property the key exists for: the same
+// real operation proposed by two DIFFERENT runs must produce the SAME key, so the
+// reservation layer can refuse the second. Only a change to the real operation —
+// target, revision or content — may change it.
+func TestBusinessFactKeyIsStableAcrossRuns(t *testing.T) {
+	a, _ := Default().Run(context.Background(), Request{RunID: "run-aaa", Intent: "inventory", Records: scoped()})
+	b, _ := Default().Run(context.Background(), Request{RunID: "run-bbb", Intent: "inventory", Records: scoped()})
+	if a.Draft == nil || b.Draft == nil {
+		t.Fatal("expected drafts")
+	}
+	if a.Draft.Operations[0].BusinessKey != b.Draft.Operations[0].BusinessKey {
+		t.Fatalf("two runs proposing the same real operation must share a key: %q vs %q",
+			a.Draft.Operations[0].BusinessKey, b.Draft.Operations[0].BusinessKey)
+	}
+	// A different revision of the same target is a genuinely different operation.
+	other := scoped()
+	other[0].Version = 4
+	c, _ := Default().Run(context.Background(), Request{RunID: "run-aaa", Intent: "inventory", Records: other})
+	if c.Draft == nil {
+		t.Fatal("expected draft")
+	}
+	if c.Draft.Operations[0].BusinessKey == a.Draft.Operations[0].BusinessKey {
+		t.Fatal("a different revision must produce a different key")
 	}
 }

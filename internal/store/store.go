@@ -340,6 +340,13 @@ func (s *Store) createProposalTx(ctx context.Context, tx pgx.Tx, org, task, acto
 		if ops[i].Integration == "" || ops[i].Action == "" || ops[i].TargetID == "" || ops[i].ExpectedVersion < 1 {
 			return x, errors.New("invalid operation")
 		}
+		// A run-scoped business key defeats cross-run duplicate detection: two
+		// independent runs would each reserve their own key for the SAME real
+		// operation and both could be applied. Enforced here, not only in one
+		// adapter, so every present and future runner is held to it.
+		if originRunID != "" && strings.Contains(ops[i].BusinessKey, originRunID) {
+			return x, errors.New("business key must identify the real operation, not this run")
+		}
 		c, ok := reg.Get(ops[i].Integration)
 		if !ok || c.Validate(ops[i]) != nil {
 			return x, errors.New("invalid operation")
