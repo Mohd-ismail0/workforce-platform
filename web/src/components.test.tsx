@@ -62,11 +62,7 @@ describe("handoff UI", () => {
         summary: "Please take this",
       }),
     );
-    fireEvent.submit(
-      screen.getByRole("form", { name: "Accept handoff offer" }),
-    );
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
-    expect(fetchMock.mock.calls[1][0]).toContain("/handoffs/offer-7/accept");
+    expect(screen.queryByRole("form", { name: "Accept handoff offer" })).toBeNull();
   });
   it("shows real API errors", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(

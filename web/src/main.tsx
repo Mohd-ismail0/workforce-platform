@@ -7,6 +7,7 @@ import {
   createHandoff,
   getToken,
   list,
+  listHandoffs,
   Me,
   Operation,
   operationPayload,
@@ -24,6 +25,7 @@ const nav = [
   "Integrations",
   "Agents",
   "Activity & receipts",
+  "Handoffs",
 ];
 const statuses = [
   "draft",
@@ -148,27 +150,7 @@ export function HandoffForms({
         </label>
         <button className="primary">Offer handoff</button>
       </form>
-      {offerId && (
-        <p role="status">
-          Offer ID: <code>{offerId}</code>
-        </p>
-      )}
-      <form onSubmit={accept} aria-label="Accept handoff offer">
-        <label>
-          Known offer ID
-          <input
-            required
-            value={offerId}
-            onChange={(e) => setOfferId(e.target.value)}
-          />
-        </label>
-        <button className="button">Accept offer</button>
-      </form>
-      <small>
-        Offers cannot be listed here because the backend provides no GET
-        offer-list endpoint; enter a known offer ID.
-      </small>
-      {accepted && <p role="status">Handoff accepted.</p>}
+      <p role="status">{offerId ? <>Offer created: <code>{offerId}</code>. Incoming offers appear in Handoffs, where only the intended recipient can accept.</> : "Incoming offers appear in Handoffs, where only the intended recipient can accept."}</p>
     </section>
   );
 }
@@ -250,7 +232,7 @@ function Shell({
               onClick={() => setPage(n)}
             >
               <span className="nav-icon">
-                {["⌂", "▦", "✓", "◈", "◎", "≋"][i]}
+                {["⌂", "▦", "✓", "◈", "◎", "≋", "⇄"][i]}
               </span>
               {n}
             </button>
@@ -300,7 +282,16 @@ function Page({
   if (page === "Integrations") return <Integrations setError={setError} />;
   if (page === "Agents") return <Agents setError={setError} />;
   if (page === "Activity & receipts") return <Activity setError={setError} />;
+  if (page === "Handoffs") return <Handoffs me={me} setError={setError} />;
   return <Overview me={me} setError={setError} />;
+}
+export function Handoffs({ me, setError }: { me: Me; setError: (v: string) => void }) {
+  const [items, setItems] = useState<import("./api").HandoffOffer[]>([]);
+  const [loading, setLoading] = useState(true);
+  const load = () => { setLoading(true); listHandoffs().then(setItems).catch((e) => setError(e.message)).finally(() => setLoading(false)); };
+  useEffect(load, []);
+  const accept = async (id: string) => { try { await acceptHandoff(id); load(); } catch (e) { setError((e as Error).message); } };
+  return <section aria-label="Handoff inbox"><div className="toolbar"><div><h2>Handoffs</h2><p className="muted">Incoming offers for you and outgoing offers you created.</p></div><button className="button" onClick={load}>Refresh</button></div>{loading ? <p className="muted">Loading handoffs…</p> : !items.length ? empty : <div className="handoff-list">{items.map((h) => { const incoming = h.recipient_id === me.id; return <article className="panel handoff-card" key={h.id}><div className="handoff-head"><span className="tag">{incoming ? "INCOMING" : "OUTGOING"}</span><span className="status-chip">{h.state}</span></div><h3>{h.summary}</h3><p className="muted">Task <code>{h.task_id}</code> · role: {h.role}</p><small className="muted">Created {h.created_at}</small>{incoming && h.state === "offered" && <button className="primary" onClick={() => accept(h.id)}>Accept handoff</button>}</article>;})}</div>}</section>;
 }
 function Overview({ me, setError }: { me: Me; setError: (v: string) => void }) {
   const [tasks, setTasks] = useState<Task[]>([]);

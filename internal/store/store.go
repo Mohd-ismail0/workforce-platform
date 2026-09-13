@@ -6,8 +6,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -15,7 +13,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/riverqueue/river"
 	"github.com/riverqueue/river/riverdriver/riverpgxv5"
-	"github.com/riverqueue/river/rivermigrate"
 	"workforce.local/platform/internal/connectors"
 	"workforce.local/platform/internal/platform"
 )
@@ -65,38 +62,6 @@ func (s *Store) WithOrg(ctx context.Context, org string, fn func(pgx.Tx) error) 
 	}
 	return tx.Commit(ctx)
 }
-func Migrate(ctx context.Context, url, dir string) error {
-	s, e := Open(ctx, url)
-	if e != nil {
-		return e
-	}
-	defer s.Close()
-	// Workforce's application migration marker is intentionally independent of
-	// River's own river_migration table; this keeps reruns safe for both systems.
-	if _, e = s.Pool.Exec(ctx, `CREATE TABLE IF NOT EXISTS workforce_migrations (version text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT clock_timestamp())`); e != nil {
-		return e
-	}
-	files, e := filepath.Glob(filepath.Join(dir, "*.sql"))
-	if e != nil {
-		return e
-	}
-	for _, file := range files {
-		b, err := os.ReadFile(file)
-		if err != nil {
-			return err
-		}
-		if err = s.WithOrg(ctx, "", func(tx pgx.Tx) error { _, err := tx.Exec(ctx, string(b)); return err }); err != nil {
-			return err
-		}
-	}
-	driver := riverpgxv5.New(s.Pool)
-	migrator, e := rivermigrate.New(driver, nil)
-	if e != nil {
-		return e
-	}
-	_, e = migrator.Migrate(ctx, rivermigrate.DirectionUp, nil)
-	return e
-}
 
 func digest(v any) string {
 	b, _ := json.Marshal(v)
@@ -134,15 +99,16 @@ type Agent struct {
 	Capabilities []string `json:"capabilities"`
 }
 type Proposal struct {
-	ID         string                 `json:"id"`
-	OrgID      string                 `json:"org_id"`
-	TaskID     string                 `json:"task_id"`
-	Revision   int64                  `json:"revision"`
-	Digest     string                 `json:"digest"`
-	Status     string                 `json:"status"`
-	Summary    string                 `json:"summary"`
-	Operations []connectors.Operation `json:"operations"`
-	CreatedAt  string                 `json:"created_at"`
+	ID            string                 `json:"id"`
+	OrgID         string                 `json:"org_id"`
+	TaskID        string                 `json:"task_id"`
+	Revision      int64                  `json:"revision"`
+	Digest        string                 `json:"digest"`
+	Status        string                 `json:"status"`
+	Summary       string                 `json:"summary"`
+	Operations    []connectors.Operation `json:"operations"`
+	CreatedAt     string                 `json:"created_at"`
+	FailureReason string                 `json:"failure_reason,omitempty"`
 }
 type Decision struct {
 	ID         string `json:"id"`
@@ -172,6 +138,7 @@ type Receipt struct {
 	CreatedAt   string         `json:"created_at"`
 }
 type Handoff struct {
+	CreatedBy   string `json:"created_by"`
 	ID          string `json:"id"`
 	TaskID      string `json:"task_id"`
 	RecipientID string `json:"recipient_id"`
@@ -265,6 +232,32 @@ func (s *Store) ListTasks(ctx context.Context, org string) ([]Task, error) {
 		return rows.Err()
 	})
 	return out, e
+}
+func (s *Store) enqueueEligibleChildren(ctx context.Context, tx pgx.Tx, org, parent string) error {
+	rows, err := tx.Query(ctx, `select distinct p.id from task_dependencies d join proposals p on p.org_id=d.org_id and p.task_id=d.task_id join tasks t on t.org_id=d.org_id and t.id=d.task_id where d.org_id=$1 and d.parent_id=$2 and p.status='approved' and t.status not in ('done','cancelled') and not exists (select 1 from task_dependencies d2 join tasks parent2 on parent2.org_id=d2.org_id and parent2.id=d2.parent_id where d2.org_id=p.org_id and d2.task_id=p.task_id and parent2.status <> 'done')`, org, parent)
+	if err != nil {
+		return err
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err = rows.Scan(&id); err != nil {
+			rows.Close()
+			return err
+		}
+		ids = append(ids, id)
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return err
+	}
+	for _, id := range ids {
+		if err = s.riverInsertTx(ctx, tx, ProposalExecuteArgs{OrgID: org, ProposalID: id}); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 func (s *Store) AddDependency(ctx context.Context, org, task, parent string) error {
 	return s.WithOrg(ctx, org, func(tx pgx.Tx) error {
@@ -659,6 +652,28 @@ func (s *Store) RunWorker(ctx context.Context, reg *connectors.Registry) error {
 }
 
 func (s *Store) executeProposal(ctx context.Context, reg *connectors.Registry, org, pid string) error {
+	err := s.applyProposal(ctx, reg, org, pid)
+	if errors.Is(err, connectors.ErrStale) || errors.Is(err, connectors.ErrInvalid) || errors.Is(err, connectors.ErrUnknown) {
+		return s.WithOrg(ctx, org, func(tx pgx.Tx) error {
+			var task string
+			e := tx.QueryRow(ctx, "UPDATE proposals SET status='needs_attention',failure_reason='invalid_or_stale_operation' WHERE org_id=$1 AND id=$2 AND status IN ('approved','executing') RETURNING task_id", org, pid).Scan(&task)
+			if errors.Is(e, pgx.ErrNoRows) {
+				return nil
+			}
+			if e != nil {
+				return e
+			}
+			if _, e = tx.Exec(ctx, "UPDATE tasks SET status='blocked',version=version+1 WHERE org_id=$1 AND id=$2 AND status NOT IN ('done','cancelled')", org, task); e != nil {
+				return e
+			}
+			_, e = tx.Exec(ctx, "UPDATE effects SET state='needs_attention' WHERE org_id=$1 AND proposal_id=$2 AND state='authorized'", org, pid)
+			return e
+		})
+	}
+	return err
+}
+
+func (s *Store) applyProposal(ctx context.Context, reg *connectors.Registry, org, pid string) error {
 	return s.WithOrg(ctx, org, func(tx pgx.Tx) error {
 		var task, status string
 		if e := tx.QueryRow(ctx, "select task_id,status from proposals where org_id=$1 and id=$2 for update", org, pid).Scan(&task, &status); e != nil {
@@ -668,11 +683,20 @@ func (s *Store) executeProposal(ctx context.Context, reg *connectors.Registry, o
 			return nil
 		}
 		var permitted bool
+		var e error
 		if e := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM tasks t JOIN principals owner ON owner.id=t.owner_id AND owner.org_id=t.org_id WHERE t.id=$2 AND t.org_id=$1 AND t.status NOT IN ('cancelled','done') AND owner.active) AND EXISTS(SELECT 1 FROM proposal_decisions d JOIN principals p ON p.id=d.actor_id AND p.org_id=d.org_id WHERE d.org_id=$1 AND d.proposal_id=$3 AND d.kind='approve' AND p.active AND p.role IN ('approver','admin')) AND EXISTS(SELECT 1 FROM proposal_decisions d JOIN principals p ON p.id=d.actor_id AND p.org_id=d.org_id WHERE d.org_id=$1 AND d.proposal_id=$3 AND d.kind='endorse' AND p.active) AND NOT EXISTS(SELECT 1 FROM task_dependencies d JOIN tasks t ON t.id=d.parent_id AND t.org_id=d.org_id WHERE d.org_id=$1 AND d.task_id=$2 AND t.status<>'done')`, org, task, pid).Scan(&permitted); e != nil {
 			return e
 		}
 		if !permitted {
-			_, e := tx.Exec(ctx, "UPDATE proposals SET status='needs_attention' WHERE org_id=$1 AND id=$2", org, pid)
+			var blocked bool
+			if e = tx.QueryRow(ctx, `select exists(select 1 from task_dependencies d join tasks p on p.org_id=d.org_id and p.id=d.parent_id where d.org_id=$1 and d.task_id=$2 and p.status <> 'done')`, org, task).Scan(&blocked); e != nil {
+				return e
+			}
+			if blocked {
+				_, e = tx.Exec(ctx, "update tasks set status='blocked' where org_id=$1 and id=$2 and status not in ('done','cancelled')", org, task)
+				return e
+			}
+			_, e = tx.Exec(ctx, "UPDATE proposals SET status='needs_attention',failure_reason='authorization_or_dependency_unavailable' WHERE org_id=$1 AND id=$2", org, pid)
 			return e
 		}
 		if _, e := tx.Exec(ctx, "update proposals set status='executing' where id=$1", pid); e != nil {
@@ -743,6 +767,9 @@ func (s *Store) executeProposal(ctx context.Context, reg *connectors.Registry, o
 		_, e = tx.Exec(ctx, "update proposals set status='done' where org_id=$1 and id=$2", org, pid)
 		if e == nil {
 			_, e = tx.Exec(ctx, "update tasks set status='done',version=version+1 where org_id=$1 and id=$2 and status <> 'cancelled'", org, task)
+		}
+		if e == nil {
+			e = s.enqueueEligibleChildren(ctx, tx, org, task)
 		}
 		return e
 	})

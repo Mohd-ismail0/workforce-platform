@@ -36,8 +36,12 @@ export type HandoffOffer = {
   recipient_id: string;
   role: string;
   summary: string;
-  status?: string;
+  state: string;
+  created_by: string;
+  created_at: string;
 };
+
+export const listHandoffs = () => list<HandoffOffer>("/handoffs");
 
 const tokenKey = "workforce.local.token";
 export const getToken = () => sessionStorage.getItem(tokenKey) || "";

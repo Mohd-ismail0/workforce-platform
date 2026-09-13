@@ -159,6 +159,9 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 	case path == "/events" && r.Method == "GET":
 		x, e := s.store.ListEvents(ctx, id.OrgID)
 		respond(w, x, e)
+	case path == "/handoffs" && r.Method == "GET":
+		x, e := s.store.ListHandoffs(ctx, id.OrgID, id.ID)
+		respond(w, x, e)
 	case path == "/receipts" && r.Method == "GET":
 		x, e := s.store.ListReceipts(ctx, id.OrgID)
 		respond(w, x, e)
