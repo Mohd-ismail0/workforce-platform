@@ -12,7 +12,12 @@ import (
 	"workforce.local/platform/internal/platform"
 )
 
-var businessKeyRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$`)
+// Business identifiers in real work carry '@' (supplier and customer email addresses)
+// and '+' (tagged addresses, phone numbers). Rejecting them would push harness authors
+// to mangle keys, and a mangled key is a WEAKER duplicate guard than the real
+// identifier it was derived from. Parameterised lookups mean these characters carry no
+// injection risk; the length cap still applies.
+var businessKeyRE = regexp.MustCompile(`^[A-Za-z0-9+][A-Za-z0-9._:/+@-]{0,199}$`)
 
 func validateBusinessKey(k string) error {
 	if !businessKeyRE.MatchString(k) {

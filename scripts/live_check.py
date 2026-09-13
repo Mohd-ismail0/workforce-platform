@@ -213,6 +213,102 @@ if gate:
         _, rp2 = call(requester, "GET", f"/proposals/{resumed['proposal_id']}", expect=200)
         expect("resumed output still needs a human", rp2["status"], "pending_endorsement")
 
+
+# 7. A REAL subprocess harness, through the whole governed loop.
+#
+# Everything above used the in-process simulator. This section configures a harness
+# that is launched as a SEPARATE PROCESS by the CLI runner, receives the run context
+# on stdin, and whose stdout is validated by the same proposal path any harness's
+# output takes. It still needs no model credential, so this proves the execution
+# boundary and the pause/resume loop without pretending an AI ran.
+_, h_task = call(requester, "POST", "/tasks", {"title": "live real harness run"}, expect=201)
+code, h_agent = call(requester, "POST", "/agents",
+                     {"name": "Live CLI Harness Agent", "harness": "test-harness"}, expect=201)
+
+# This database persists between runs, so a PREVIOUS live check may have left an
+# ACTIVE harness release binding to this runner. Revoke any such binding first, or
+# the "no active release" gate below cannot be observed at all.
+_, existing = call(admin, "GET", "/registry/releases", expect=200)
+for r in existing.get("items") or []:
+    if r.get("kind") == "harness" and r.get("state") in ("verified", "approved", "installed", "active", "draining"):
+        code, _ = call(admin, "POST", f"/registry/releases/{r['id']}/transition",
+                       {"expected_version": r["revision"], "target_state": "revoked",
+                        "reason": "live check reset"})
+        if code != 200:
+            # Not every state can jump straight to revoked; disabling still stops
+            # the binding from satisfying the gate.
+            call(admin, "POST", f"/registry/releases/{r['id']}/transition",
+                 {"expected_version": r["revision"], "target_state": "disabled",
+                  "reason": "live check reset"})
+
+# An agent whose harness has no active release must be refused, not silently simulated.
+code, refused = call(requester, "POST", f"/tasks/{h_task['id']}/runs",
+                     {"agent_id": h_agent["id"], "intent": "send the supplier follow-up"})
+if code == 409 and refused["error"]["code"] == "harness_unsupported":
+    # Fail with something actionable instead of a confusing assertion: this section
+    # only works when BOTH the api and worker processes can actually run the harness.
+    harness_path = pathlib.Path(__file__).resolve().parents[1] / "internal/runner/testdata/harness.py"
+    raise SystemExit(
+        "This live check needs the CLI harness runner configured on BOTH the api and "
+        "worker processes. Relaunch them with:\n"
+        "  export WORKFORCE_RUNNER_CLI_IDS=test-harness\n"
+        "  export WORKFORCE_RUNNER_CLI_TEST_HARNESS_COMMAND='python3 %s'\n"
+        "  export WORKFORCE_RUNNER_CLI_TEST_HARNESS_ENV=HARNESS_MODE\n"
+        "  export WORKFORCE_RUNNER_CLI_TEST_HARNESS_TIMEOUT=30s\n"
+        "  export HARNESS_MODE=auto\n" % harness_path)
+if code != 409:
+    raise SystemExit(f"expected the run to be refused while no harness release is active, got {code}: {refused}")
+expect("real harness refused without an active release", code, 409)
+expect("refusal names the missing harness", refused["error"]["code"], "no_active_harness")
+
+code, h_rel = call(admin, "POST", "/registry/releases", {
+    "family": "harness-real-" + stamp, "kind": "harness", "version": "1.0.0-" + stamp,
+    "digest": "sha256:real-" + stamp, "requested_capabilities": ["prepare_proposal"],
+    # This release is a TEST DOUBLE, so it is marked as a simulation honestly.
+    "simulation": True, "compatibility_range": ">=1",
+    "manifest": {"runner_id": "test-harness"}}, expect=201)
+for step in ("verified", "approved", "installed", "active"):
+    code, h_rel = call(admin, "POST", f"/registry/releases/{h_rel['id']}/transition",
+                       {"expected_version": h_rel["revision"], "target_state": step, "reason": "live check"})
+    expect(f"real harness promoted to {step}", code, 200)
+
+code, h_run = call(requester, "POST", f"/tasks/{h_task['id']}/runs",
+                   {"agent_id": h_agent["id"], "intent": "send the supplier follow-up"}, expect=201)
+expect("real harness run accepted", code, 201)
+expect("run binds the real runner", h_run["runner_id"], "test-harness")
+
+h_state = {}
+for _ in range(60):
+    _, h_state = call(requester, "GET", f"/runs/{h_run['id']}", expect=200)
+    if h_state["status"] in ("waiting", "failed", "succeeded"):
+        break
+    time.sleep(0.5)
+expect("real harness asks instead of guessing", h_state["status"], "waiting")
+expect("its process published nothing while paused", h_state["proposal_id"], "")
+
+_, h_gates = call(requester, "GET", "/gates", expect=200)
+h_gate = next((g for g in h_gates["items"] if g["run_id"] == h_run["id"]), None)
+expect("its question reaches the respondent", h_gate is not None, True)
+if h_gate:
+    supplier = f"ops+{stamp}@supplier.test"
+    call(requester, "POST", f"/gates/{h_gate['id']}/respond",
+         {"revision": h_gate["revision"],
+          "response": {"supplier_email": supplier, "quantity": 7}}, expect=200)
+    resumed_state = {}
+    for _ in range(80):
+        _, resumed_state = call(requester, "GET", f"/runs/{h_run['id']}", expect=200)
+        if resumed_state["status"] in ("succeeded", "failed"):
+            break
+        time.sleep(0.5)
+    expect("real harness resumes after the answer", resumed_state["status"], "succeeded")
+    if resumed_state["proposal_id"]:
+        _, hp = call(requester, "GET", f"/proposals/{resumed_state['proposal_id']}", expect=200)
+        expect("its output still needs a human", hp["status"], "pending_endorsement")
+        ops = json.dumps(hp.get("operations") or [])
+        expect("the human's answer reached the work", supplier in ops, True)
+        expect("the key names the real enquiry, not the run",
+               str(h_run["id"]) not in ops, True)
+
 width = max(len(n) for n, _, _ in checks)
 for name, got, want in checks:
     print(f"  {name:<{width}}  got={got!r:<12} want={want!r:<12} {'OK' if got == want else 'MISMATCH'}")

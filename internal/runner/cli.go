@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -60,6 +61,36 @@ type cliRunner struct {
 	timeout   time.Duration
 	maxOutput int64
 	envAllow  []string
+	// pathList is the PATH the child sees, used BOTH to resolve the binary and as
+	// the child's PATH. The ambient PATH is deliberately never used: resolving
+	// "python3" against a developer shell's PATH picked up an unrelated virtualenv
+	// interpreter that could not start under the restricted child environment.
+	pathList string
+}
+
+// defaultRunnerPath is a conservative PATH used when the operator configures none.
+const defaultRunnerPath = "/usr/local/bin:/usr/bin:/bin"
+
+// resolveBinary finds the executable using ONLY the configured PATH (or accepts an
+// absolute path directly). exec.LookPath is not used because it consults the
+// ambient environment, which must not influence how a harness is launched.
+func resolveBinary(cmd0, pathList string) (string, error) {
+	if filepath.IsAbs(cmd0) {
+		if st, err := os.Stat(cmd0); err == nil && !st.IsDir() {
+			return cmd0, nil
+		}
+		return "", errors.New("configured executable not found")
+	}
+	for _, dir := range filepath.SplitList(pathList) {
+		if dir == "" {
+			continue
+		}
+		cand := filepath.Join(dir, cmd0)
+		if st, err := os.Stat(cand); err == nil && !st.IsDir() && st.Mode()&0o111 != 0 {
+			return cand, nil
+		}
+	}
+	return "", errors.New("configured executable not found on the configured PATH")
 }
 
 func (c cliRunner) Manifest() Manifest {
@@ -95,6 +126,10 @@ func cliConfigs() []cliRunner {
 			timeout:   120 * time.Second,
 			maxOutput: 1 << 20,
 			envAllow:  splitList(os.Getenv("WORKFORCE_RUNNER_CLI_" + key + "_ENV")),
+			pathList:  defaultRunnerPath,
+		}
+		if raw := os.Getenv("WORKFORCE_RUNNER_CLI_" + key + "_PATH"); raw != "" {
+			r.pathList = raw
 		}
 		if raw := os.Getenv("WORKFORCE_RUNNER_CLI_" + key + "_TIMEOUT"); raw != "" {
 			if d, e := time.ParseDuration(raw); e == nil && d > 0 {
@@ -273,7 +308,7 @@ type cliReply struct {
 }
 
 func (c cliRunner) Run(ctx context.Context, req Request) (Result, error) {
-	bin, err := exec.LookPath(c.command[0])
+	bin, err := resolveBinary(c.command[0], c.pathList)
 	if err != nil {
 		// Fail closed and visibly: an unpromoted/uninstalled harness must not look
 		// like a business failure, and must never fall back to the simulator.
@@ -287,16 +322,31 @@ func (c cliRunner) Run(ctx context.Context, req Request) (Result, error) {
 	if err := os.MkdirAll(workRoot, 0o700); err != nil {
 		return Result{Status: StatusFailed, FailureReason: FailInternal}, nil
 	}
+	// Best-effort sweep of workspaces abandoned by a killed process. A run is capped
+	// at 10 minutes, so anything older than an hour cannot belong to a live run.
+	if entries, derr := os.ReadDir(workRoot); derr == nil {
+		cutoff := time.Now().Add(-time.Hour)
+		for _, e := range entries {
+			if info, ierr := e.Info(); ierr == nil && info.ModTime().Before(cutoff) {
+				_ = os.RemoveAll(filepath.Join(workRoot, e.Name()))
+			}
+		}
+	}
 	scratch, err := os.MkdirTemp(workRoot, "run-")
 	if err != nil {
 		return Result{Status: StatusFailed, FailureReason: FailInternal}, nil
 	}
 	defer os.RemoveAll(scratch)
 
+	// Empty collections are sent as [] and never null. Go marshals a nil slice as
+	// null, and a harness written in Python/JS does `doc.get("inputs", [])`, which
+	// yields None/null rather than [] when the key EXISTS with a null value — so
+	// iterating it raises and the run dies with a confusing nonzero exit. The
+	// protocol must not carry that trap to every harness author.
 	doc, _ := json.Marshal(cliInputDoc{
 		OrgID: req.OrgID, TaskID: req.TaskID, RunID: req.RunID, AgentID: req.AgentID,
-		Harness: req.Harness, Intent: req.Intent, Records: req.Records, Inputs: req.Inputs,
-		Instructions: cliInstructions,
+		Harness: req.Harness, Intent: req.Intent, Records: nonNilRecords(req.Records),
+		Inputs: nonNilInputs(req.Inputs), Instructions: cliInstructions,
 	})
 
 	runCtx, cancel := context.WithTimeout(ctx, c.timeout)
@@ -306,7 +356,7 @@ func (c cliRunner) Run(ctx context.Context, req Request) (Result, error) {
 	cmd.Dir = scratch
 	// Explicit allowlist only. Never os.Environ(): that would hand the harness the
 	// developer's HOME, SSH agent, git credentials and our database URL.
-	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + scratch}
+	cmd.Env = []string{"PATH=" + c.pathList, "HOME=" + scratch}
 	for _, name := range c.envAllow {
 		if v, ok := os.LookupEnv(name); ok {
 			cmd.Env = append(cmd.Env, name+"="+v)
@@ -351,8 +401,9 @@ func (c cliRunner) Run(ctx context.Context, req Request) (Result, error) {
 		return Result{Status: StatusFailed, FailureReason: FailOutputOverflow}, nil
 	}
 	if werr != nil {
-		// stderr is deliberately discarded: it is diagnostics and may contain
-		// provider text that must never reach a user-visible field.
+		// stderr never reaches a user-visible field, but operators need the cause:
+		// without this, a nonzero exit is undebuggable — as it just was in practice.
+		log.Printf("harness %q (%s) failed: %v; stderr tail: %s", c.id, bin, werr, tail(errBuf.String(), 2000))
 		return Result{Status: StatusFailed, FailureReason: FailNonzeroExit}, nil
 	}
 
@@ -453,4 +504,28 @@ func sanitizeReason(s string) string {
 		}
 	}
 	return s
+}
+
+// tail returns at most n trailing characters of a bounded diagnostic string.
+func tail(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return "..." + s[len(s)-n:]
+}
+
+// nonNilInputs and nonNilRecords keep the published protocol free of nulls for
+// empty collections, so a harness never has to special-case None/null.
+func nonNilInputs(in []Input) []Input {
+	if in == nil {
+		return []Input{}
+	}
+	return in
+}
+
+func nonNilRecords(in []RecordRef) []RecordRef {
+	if in == nil {
+		return []RecordRef{}
+	}
+	return in
 }

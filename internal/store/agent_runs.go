@@ -7,6 +7,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/riverqueue/river"
 	"github.com/riverqueue/river/riverdriver/riverpgxv5"
+	"log"
 	"time"
 	"workforce.local/platform/internal/connectors"
 	"workforce.local/platform/internal/platform"
@@ -227,14 +228,17 @@ func (s *Store) ExecuteAgentRun(ctx context.Context, org, id string) error {
 		return tx.QueryRow(ctx, "select owner_id from tasks where org_id=$1 and id=$2", org, task).Scan(&owner)
 	})
 	if e != nil {
+		log.Printf("agent run %s: gathering context failed: %v", id, e)
 		return s.failRun(ctx, org, id, tok, "internal_error")
 	}
 	r, e := runner.New(runnerID)
 	if e != nil {
+		log.Printf("agent run %s: runner %q is not available to this process: %v", id, runnerID, e)
 		return s.failRun(ctx, org, id, tok, "internal_error")
 	}
 	res, re := r.Run(ctx, runner.Request{OrgID: org, TaskID: task, RunID: id, AgentID: aid, Harness: h, Intent: intent, Records: recs, Inputs: inputs})
 	if re != nil {
+		log.Printf("agent run %s: runner %q errored: %v", id, runnerID, re)
 		return s.failRun(ctx, org, id, tok, "internal_error")
 	}
 	if res.Status == runner.StatusWaiting && res.Gate != nil {

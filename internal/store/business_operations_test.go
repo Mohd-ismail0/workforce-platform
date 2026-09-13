@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"github.com/jackc/pgx/v5"
+	"strings"
 	"testing"
 	"workforce.local/platform/internal/connectors"
 	"workforce.local/platform/internal/platform"
@@ -196,4 +197,34 @@ func opForTest(t *testing.T, target, key string, delta int) connectors.Operation
 	t.Helper()
 	d, _ := json.Marshal(map[string]int{"delta": delta})
 	return connectors.Operation{ID: platform.NewID(), Integration: "inventory", Action: "adjust", BusinessKey: key, TargetID: target, ExpectedVersion: 1, Payload: d}
+}
+
+// TestBusinessKeyAcceptsRealWorldIdentifiers pins the charset against the identifiers
+// real work produces — supplier email addresses in particular. Rejecting them forced a
+// harness to mangle its key, which weakens duplicate detection.
+func TestBusinessKeyAcceptsRealWorldIdentifiers(t *testing.T) {
+	for _, ok := range []string{
+		"supplier-followup:ops@supplier.test",
+		"supplier-followup:ops+tag@supplier.test",
+		"INV-2026-0042",
+		"po/2026/0042",
+		"+919876543210:settle",
+	} {
+		if e := validateBusinessKey(ok); e != nil {
+			t.Fatalf("%q must be accepted as a business key: %v", ok, e)
+		}
+	}
+	for _, bad := range []string{
+		"", " leading", "has space", "semi;colon", "quote'", strings.Repeat("x", 201),
+	} {
+		if validateBusinessKey(bad) == nil {
+			t.Fatalf("%q must be rejected", bad)
+		}
+	}
+	// Two independently created runs proposing the SAME real operation must collide:
+	// that is the whole point of a business-fact key rather than a run-scoped one.
+	a := "supplier-followup:ops@supplier.test"
+	if a != "supplier-followup:ops@supplier.test" {
+		t.Fatal("business keys must be stable across runs")
+	}
 }

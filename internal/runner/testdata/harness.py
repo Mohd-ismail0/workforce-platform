@@ -61,7 +61,7 @@ if MODE == "stdin":
             fh.write(raw)
 
 run_id = req.get("run_id", "run")
-records = req.get("records", [])
+records = req.get("records") or []
 mail = next((r for r in records if r.get("integration") == "mail"), None)
 
 if MODE == "waiting":
@@ -79,6 +79,53 @@ if MODE == "waiting":
                 "required": ["supplier_email", "quantity"],
             },
         },
+    }))
+    sys.exit(0)
+
+GATE = {
+    "kind": "missing_information",
+    "prompt": "Which supplier, and what quantity should this follow-up cover?",
+    "input_schema": {
+        "properties": {
+            "supplier_email": {"type": "string"},
+            "quantity": {"type": "integer"},
+        },
+        "required": ["supplier_email", "quantity"],
+    },
+}
+
+if MODE == "auto":
+    # Pause until the human supplies what is missing, then use their answer.
+    # `or []` as well as a default: a key present with a null value still yields None.
+    supplied = {i.get("name"): i.get("value") for i in (req.get("inputs") or []) if i.get("value")}
+    if not supplied.get("supplier_email") or not supplied.get("quantity"):
+        print(json.dumps({"status": "waiting", "summary": "Need supplier details", "gate": GATE}))
+        sys.exit(0)
+    email = json.loads(supplied["supplier_email"])
+    qty = int(json.loads(supplied["quantity"]))
+    if mail is None:
+        print(json.dumps({"status": "failed", "failure_reason": "no_suitable_record"}))
+        sys.exit(0)
+    print(json.dumps({
+        "status": "succeeded",
+        "summary": "Prepared supplier follow-up for %s" % email,
+        "operations": [{
+            "integration": "mail",
+            "action": "send",
+            # A BUSINESS-FACT key: identifies the real enquiry, not this run. Two
+            # independent runs proposing the same follow-up must collide, or
+            # duplicate detection is defeated.
+            "business_key": "supplier-followup:" + email,
+            "target_id": mail["id"],
+            "expected_version": mail.get("version", 1),
+            "payload": {
+                "recipients": [email],
+                "subject": "Stock adjustment request",
+                "body": "Requesting a stock adjustment of %d units." % qty,
+                "bcc": [],
+                "attachments": [],
+            },
+        }],
     }))
     sys.exit(0)
 

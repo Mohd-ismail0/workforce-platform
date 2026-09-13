@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"os"
@@ -344,5 +345,66 @@ func TestSplitWordsHandlesQuotesAndEscapes(t *testing.T) {
 	}
 	if len(words) < 2 || words[0] != "cmd;" {
 		t.Fatalf("expected literal words, got %v", words)
+	}
+}
+
+// TestCLIRunnerSweepsAbandonedScratchDirs covers cleanup after a hard kill: a worker
+// killed with SIGKILL never runs its deferred cleanup, so abandoned workspaces must
+// be swept rather than accumulating forever.
+func TestCLIRunnerSweepsAbandonedScratchDirs(t *testing.T) {
+	r, workRoot := fakeRunner(t, "success")
+
+	stale := filepath.Join(workRoot, "run-abandoned")
+	if err := os.MkdirAll(stale, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(stale, old, old); err != nil {
+		t.Fatal(err)
+	}
+	fresh := filepath.Join(workRoot, "run-inflight")
+	if err := os.MkdirAll(fresh, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := r.Run(context.Background(), sampleRequest()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Fatal("an abandoned workspace should be swept")
+	}
+	if _, err := os.Stat(fresh); err != nil {
+		t.Fatal("a recent workspace must NOT be swept: it may belong to a live run")
+	}
+}
+
+// TestCLIRunnerEmitsEmptyArraysNotNull pins the protocol guarantee that cost real
+// debugging time: with no inputs, the runner must send [] rather than null, because
+// `doc.get("inputs", [])` returns None (not []) when the key exists with a null value,
+// and every harness author would otherwise have to special-case it.
+func TestCLIRunnerEmitsEmptyArraysNotNull(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "stdin.json")
+	t.Setenv("HARNESS_STDIN_OUT", out)
+	r, _ := fakeRunner(t, "stdin", "HARNESS_STDIN_OUT")
+
+	req := sampleRequest()
+	req.Inputs = nil
+	req.Records = nil
+	if _, err := r.Run(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("harness did not record stdin: %v", err)
+	}
+	for _, bad := range []string{`"inputs":null`, `"records":null`} {
+		if bytes.Contains(raw, []byte(bad)) {
+			t.Fatalf("protocol must not publish %s; a harness in another language trips on null", bad)
+		}
+	}
+	for _, want := range []string{`"inputs":[]`, `"records":[]`} {
+		if !bytes.Contains(raw, []byte(want)) {
+			t.Fatalf("expected %s in the published context, got: %s", want, raw)
+		}
 	}
 }
