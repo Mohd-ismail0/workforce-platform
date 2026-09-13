@@ -255,7 +255,9 @@ if code == 409 and refused["error"]["code"] == "harness_unsupported":
         "  export WORKFORCE_RUNNER_CLI_TEST_HARNESS_COMMAND='python3 %s'\n"
         "  export WORKFORCE_RUNNER_CLI_TEST_HARNESS_ENV=HARNESS_MODE\n"
         "  export WORKFORCE_RUNNER_CLI_TEST_HARNESS_TIMEOUT=30s\n"
-        "  export HARNESS_MODE=auto\n" % harness_path)
+        "  export HARNESS_MODE=auto\n"
+        "  # acknowledge the harness runs unsandboxed as this account\n"
+        "  export WORKFORCE_RUNNER_ALLOW_UNISOLATED=1\n" % harness_path)
 if code != 409:
     raise SystemExit(f"expected the run to be refused while no harness release is active, got {code}: {refused}")
 expect("real harness refused without an active release", code, 409)

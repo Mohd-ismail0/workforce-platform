@@ -139,6 +139,12 @@ WORKFORCE_RUNNER_CLI_CLAUDE_CODE_ENV=ANTHROPIC_API_KEY
 
 # Root for per-run scratch workspaces (created 0700, removed after each run).
 WORKFORCE_RUNNER_WORK_ROOT=/var/lib/workforce/runs
+
+# REQUIRED: explicit acknowledgment that this harness runs UNSANDBOXED as this
+# account. Without it the runner fails closed with `isolation_required` and no
+# process is launched. This is deliberate: reduced exposure is not containment, so
+# the risky mode must be chosen, never inherited by whoever configures a runner.
+WORKFORCE_RUNNER_ALLOW_UNISOLATED=1
 ```
 
 Then bind work to it with an **ACTIVE** harness release whose manifest names the

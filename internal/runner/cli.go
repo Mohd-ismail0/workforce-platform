@@ -28,6 +28,9 @@ const (
 	FailInvalidOutput      = "invalid_output"
 	FailNonzeroExit        = "nonzero_exit"
 	FailInternal           = "internal_error"
+	// FailIsolationRequired means the operator has not acknowledged that this
+	// adapter runs the harness as the platform's own unprivileged account.
+	FailIsolationRequired = "isolation_required"
 )
 
 const maxCLIOperations = 8
@@ -307,7 +310,20 @@ type cliReply struct {
 	Gate          *cliGate `json:"gate"`
 }
 
+// isolationAcknowledged reports whether the operator has explicitly accepted that a
+// harness runs as this account. A harness is NOT sandboxed: it reads what this account
+// reads and reaches the network this account reaches. Reduced exposure is not the same
+// as containment, so the risky mode must be chosen deliberately (least privilege
+// default) rather than inherited by anyone who happens to configure a runner.
+func isolationAcknowledged() bool {
+	v := strings.TrimSpace(os.Getenv("WORKFORCE_RUNNER_ALLOW_UNISOLATED"))
+	return v == "1" || strings.EqualFold(v, "true")
+}
+
 func (c cliRunner) Run(ctx context.Context, req Request) (Result, error) {
+	if !isolationAcknowledged() {
+		return Result{Status: StatusFailed, FailureReason: FailIsolationRequired}, nil
+	}
 	bin, err := resolveBinary(c.command[0], c.pathList)
 	if err != nil {
 		// Fail closed and visibly: an unpromoted/uninstalled harness must not look

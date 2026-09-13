@@ -22,6 +22,8 @@ func fakeRunner(t *testing.T, mode string, extraEnv ...string) (Runner, string) 
 		t.Fatalf("testdata harness missing: %v", err)
 	}
 	workRoot := t.TempDir()
+	// These tests deliberately exercise the UNISOLATED path, so they acknowledge it.
+	t.Setenv("WORKFORCE_RUNNER_ALLOW_UNISOLATED", "1")
 	t.Setenv("WORKFORCE_RUNNER_WORK_ROOT", workRoot)
 	t.Setenv("WORKFORCE_RUNNER_CLI_IDS", "fake")
 	t.Setenv("WORKFORCE_RUNNER_CLI_FAKE_COMMAND", "python3 "+script)
@@ -227,6 +229,7 @@ func TestCLIRunnerOutputCapKillsProcess(t *testing.T) {
 func TestCLIRunnerMissingBinaryFailsClosed(t *testing.T) {
 	t.Setenv("WORKFORCE_RUNNER_CLI_IDS", "ghost")
 	t.Setenv("WORKFORCE_RUNNER_CLI_GHOST_COMMAND", "workforce-no-such-binary-xyz")
+	t.Setenv("WORKFORCE_RUNNER_ALLOW_UNISOLATED", "1")
 	r, err := New("ghost")
 	if err != nil {
 		t.Fatal(err)
@@ -405,6 +408,63 @@ func TestCLIRunnerEmitsEmptyArraysNotNull(t *testing.T) {
 	for _, want := range []string{`"inputs":[]`, `"records":[]`} {
 		if !bytes.Contains(raw, []byte(want)) {
 			t.Fatalf("expected %s in the published context, got: %s", want, raw)
+		}
+	}
+}
+
+// TestCLIRunnerFailsClosedWithoutIsolationAcknowledgment is the safety claim, tested:
+// a configured harness must NOT launch until an operator explicitly accepts that it
+// runs unsandboxed as this account. Without the acknowledgment nothing starts — no
+// process, no proposal — and the failure carries a distinct public code.
+func TestCLIRunnerFailsClosedWithoutIsolationAcknowledgment(t *testing.T) {
+	script, err := filepath.Abs(filepath.Join("testdata", "harness.py"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Prove the harness WOULD work, so the refusal below is provably about consent
+	// and not about a broken configuration.
+	t.Setenv("WORKFORCE_RUNNER_ALLOW_UNISOLATED", "1")
+	t.Setenv("WORKFORCE_RUNNER_CLI_IDS", "consent")
+	t.Setenv("WORKFORCE_RUNNER_CLI_CONSENT_COMMAND", "python3 "+script)
+	t.Setenv("WORKFORCE_RUNNER_CLI_CONSENT_ENV", "HARNESS_MODE")
+	t.Setenv("HARNESS_MODE", "success")
+	t.Setenv("WORKFORCE_RUNNER_WORK_ROOT", t.TempDir())
+	ok, err := New("consent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res, _ := ok.Run(context.Background(), sampleRequest()); res.Status != StatusSucceeded {
+		t.Fatalf("harness should work once acknowledged: %q/%q", res.Status, res.FailureReason)
+	}
+
+	// Now withdraw consent: the same runner must refuse before launching.
+	t.Setenv("WORKFORCE_RUNNER_ALLOW_UNISOLATED", "")
+	res, err := ok.Run(context.Background(), sampleRequest())
+	if err != nil {
+		t.Fatalf("refusal must be a business outcome, not an error: %v", err)
+	}
+	if res.Status != StatusFailed || res.FailureReason != FailIsolationRequired {
+		t.Fatalf("got %q/%q, want failed/%s", res.Status, res.FailureReason, FailIsolationRequired)
+	}
+	if res.Draft != nil {
+		t.Fatal("nothing may be produced while the boundary is unacknowledged")
+	}
+
+	// Consent is a strict allowlist, so near-miss values must NOT be read as consent.
+	// (Trailing whitespace IS tolerated: env vars routinely pick it up, and refusing
+	// it would be a confusing footgun while adding no safety — an unrelated value
+	// still cannot sneak through.)
+	for _, notConsent := range []string{"", "0", "yes", "maybe", "false", "2", "no"} {
+		t.Setenv("WORKFORCE_RUNNER_ALLOW_UNISOLATED", notConsent)
+		if res, _ := ok.Run(context.Background(), sampleRequest()); res.FailureReason != FailIsolationRequired {
+			t.Fatalf("%q must not be read as consent (got %q)", notConsent, res.FailureReason)
+		}
+	}
+	// Deliberate forms of consent are honoured, including with surrounding whitespace.
+	for _, consent := range []string{"1", "true", "TRUE", "True", " true "} {
+		t.Setenv("WORKFORCE_RUNNER_ALLOW_UNISOLATED", consent)
+		if res, _ := ok.Run(context.Background(), sampleRequest()); res.Status != StatusSucceeded {
+			t.Fatalf("%q should be accepted as consent (got %q/%q)", consent, res.Status, res.FailureReason)
 		}
 	}
 }

@@ -23,6 +23,10 @@ export WORKFORCE_RUNNER_CLI_TEST_HARNESS_ENV=HARNESS_MODE
 export WORKFORCE_RUNNER_CLI_TEST_HARNESS_TIMEOUT=30s
 export HARNESS_MODE=auto
 
+# Deliberate acknowledgment that this harness runs UNSANDBOXED as this account. The
+# runner fails closed without it, so the risky mode is always a conscious choice.
+export WORKFORCE_RUNNER_ALLOW_UNISOLATED=1
+
 # --- credentials/config come from protected files, never from this script ---
 set -a
 . /home/prod/.config/workforce-platform/database.env
