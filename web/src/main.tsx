@@ -1,0 +1,1187 @@
+import React, { useEffect, useState } from "react";
+import { createRoot } from "react-dom/client";
+import {
+  acceptHandoff,
+  api,
+  canApprove,
+  createHandoff,
+  getToken,
+  list,
+  Me,
+  Operation,
+  operationPayload,
+  Project,
+  Proposal,
+  setToken,
+  Task,
+} from "./api";
+import "./styles.css";
+
+const nav = [
+  "Overview",
+  "Projects & tasks",
+  "My decisions",
+  "Integrations",
+  "Agents",
+  "Activity & receipts",
+];
+const statuses = [
+  "draft",
+  "ready",
+  "in_progress",
+  "in_review",
+  "blocked",
+  "done",
+  "cancelled",
+];
+const empty = (
+  <div className="empty-panel">
+    <h3>No records returned</h3>
+    <p className="muted">
+      The backend returned an empty list. Nothing is invented in this view.
+    </p>
+  </div>
+);
+
+function App() {
+  const [me, setMe] = useState<Me>();
+  const [page, setPage] = useState("Overview");
+  const [error, setError] = useState("");
+  const [token, setTok] = useState(getToken());
+  const [loading, setLoading] = useState(true);
+  useEffect(() => {
+    setLoading(true);
+    setMe(undefined);
+    if (!token) {
+      setLoading(false);
+      return;
+    }
+    api<Me>("/me")
+      .then(setMe)
+      .catch((e) => setError(e.message))
+      .finally(() => setLoading(false));
+  }, [token]);
+  if (loading)
+    return <div className="center">Connecting to local control plane…</div>;
+  if (!me) return <Login token={token} setTok={setTok} error={error} />;
+  return (
+    <Shell
+      me={me}
+      page={page}
+      setPage={setPage}
+      error={error}
+      setError={setError}
+      logout={() => {
+        setToken("");
+        setTok("");
+        setError("");
+      }}
+    />
+  );
+}
+export function HandoffForms({
+  task,
+  setError,
+  onAccepted,
+}: {
+  task: Task;
+  setError: (v: string) => void;
+  onAccepted: () => void;
+}) {
+  const [recipient, setRecipient] = useState("");
+  const [role, setRole] = useState<"owner" | "assignee">("owner");
+  const [summary, setSummary] = useState("");
+  const [offerId, setOfferId] = useState("");
+  const [accepted, setAccepted] = useState(false);
+  const offer = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      const created = await createHandoff(task.id, {
+        recipient_id: recipient,
+        role,
+        summary,
+      });
+      setOfferId(created.id);
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+  const accept = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      await acceptHandoff(offerId);
+      setAccepted(true);
+      onAccepted();
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+  return (
+    <section className="composer">
+      <h3>Handoff</h3>
+      <form onSubmit={offer} aria-label="Create handoff offer">
+        <label>
+          Recipient ID
+          <input
+            required
+            value={recipient}
+            onChange={(e) => setRecipient(e.target.value)}
+          />
+        </label>
+        <label>
+          Role
+          <select
+            value={role}
+            onChange={(e) => setRole(e.target.value as "owner" | "assignee")}
+          >
+            <option value="owner">owner</option>
+            <option value="assignee">assignee</option>
+          </select>
+        </label>
+        <label>
+          Summary
+          <textarea
+            required
+            value={summary}
+            onChange={(e) => setSummary(e.target.value)}
+          />
+        </label>
+        <button className="primary">Offer handoff</button>
+      </form>
+      {offerId && (
+        <p role="status">
+          Offer ID: <code>{offerId}</code>
+        </p>
+      )}
+      <form onSubmit={accept} aria-label="Accept handoff offer">
+        <label>
+          Known offer ID
+          <input
+            required
+            value={offerId}
+            onChange={(e) => setOfferId(e.target.value)}
+          />
+        </label>
+        <button className="button">Accept offer</button>
+      </form>
+      <small>
+        Offers cannot be listed here because the backend provides no GET
+        offer-list endpoint; enter a known offer ID.
+      </small>
+      {accepted && <p role="status">Handoff accepted.</p>}
+    </section>
+  );
+}
+
+export function Login({
+  token,
+  setTok,
+  error,
+}: {
+  token: string;
+  setTok: (v: string) => void;
+  error: string;
+}) {
+  return (
+    <main className="login">
+      <form
+        className="login-card"
+        onSubmit={(e) => {
+          e.preventDefault();
+          setToken(token);
+          setTok(token);
+        }}
+      >
+        <div className="brand-mark">W</div>
+        <p className="eyebrow">WORKFORCE / LOCAL DEV</p>
+        <h1>Sign in to the control room</h1>
+        <p className="muted">
+          Enter a server-authenticated opaque session key.
+        </p>
+        <label>
+          Opaque session key
+          <input
+            type="password"
+            value={token}
+            onChange={(e) => setTok(e.target.value)}
+            placeholder="Bearer token"
+          />
+        </label>
+        {error && <div className="alert error">{error}</div>}
+        <button className="primary" type="submit">
+          Connect
+        </button>
+        <small>Tokens are stored in sessionStorage only.</small>
+      </form>
+    </main>
+  );
+}
+function Shell({
+  me,
+  page,
+  setPage,
+  error,
+  setError,
+  logout,
+}: {
+  me: Me;
+  page: string;
+  setPage: (v: string) => void;
+  error: string;
+  setError: (v: string) => void;
+  logout: () => void;
+}) {
+  return (
+    <div className="app">
+      <aside>
+        <div className="logo">
+          <span className="brand-mark small">W</span>
+          <span>workforce</span>
+        </div>
+        <div className="env">
+          <b>LOCAL DEV</b>
+          <span>simulator-gated</span>
+        </div>
+        <nav>
+          {nav.map((n, i) => (
+            <button
+              className={page === n ? "active" : ""}
+              key={n}
+              onClick={() => setPage(n)}
+            >
+              <span className="nav-icon">
+                {["⌂", "▦", "✓", "◈", "◎", "≋"][i]}
+              </span>
+              {n}
+            </button>
+          ))}
+        </nav>
+        <div className="side-foot">
+          <div className="avatar">{me.name?.[0] || "U"}</div>
+          <div>
+            <strong>{me.name}</strong>
+            <span>{me.role}</span>
+          </div>
+          <button className="icon-button" onClick={logout}>
+            ↪
+          </button>
+        </div>
+      </aside>
+      <main className="content">
+        <header>
+          <div>
+            <p className="eyebrow">CONTROL ROOM / {page.toUpperCase()}</p>
+            <h1>{page}</h1>
+          </div>
+          <span className="role-pill">{me.role} access</span>
+        </header>
+        {error && (
+          <div className="alert error top-alert">
+            {error}
+            <button onClick={() => setError("")}>Dismiss</button>
+          </div>
+        )}
+        <Page page={page} me={me} setError={setError} />
+      </main>
+    </div>
+  );
+}
+function Page({
+  page,
+  me,
+  setError,
+}: {
+  page: string;
+  me: Me;
+  setError: (v: string) => void;
+}) {
+  if (page === "Projects & tasks") return <Projects setError={setError} />;
+  if (page === "My decisions") return <Decisions me={me} setError={setError} />;
+  if (page === "Integrations") return <Integrations setError={setError} />;
+  if (page === "Agents") return <Agents setError={setError} />;
+  if (page === "Activity & receipts") return <Activity setError={setError} />;
+  return <Overview me={me} setError={setError} />;
+}
+function Overview({ me, setError }: { me: Me; setError: (v: string) => void }) {
+  const [tasks, setTasks] = useState<Task[]>([]);
+  const [decisions, setDecisions] = useState<any[]>([]);
+  useEffect(() => {
+    Promise.all([list<Task>("/tasks"), list<any>("/decisions")])
+      .then(([t, d]) => {
+        setTasks(t);
+        setDecisions(d);
+      })
+      .catch((e) => setError(e.message));
+  }, []);
+  return (
+    <>
+      <section className="welcome">
+        <div>
+          <p className="eyebrow">GOOD MORNING, {me.name?.toUpperCase()}</p>
+          <h2>Make work legible.</h2>
+          <p className="muted">
+            A permission-aware queue for tasks, proposals, and human decisions.
+          </p>
+        </div>
+        <span className="status-dot">● API connected</span>
+      </section>
+      <div className="grid stats">
+        <article>
+          <span className="label">OPEN TASKS</span>
+          <strong>
+            {
+              tasks.filter((t) => !["done", "cancelled"].includes(t.status))
+                .length
+            }
+          </strong>
+        </article>
+        <article>
+          <span className="label">AWAITING YOUR DECISION</span>
+          <strong>{decisions.length}</strong>
+        </article>
+        <article>
+          <span className="label">WORKSPACE</span>
+          <strong className="mono">{me.org_id.slice(0, 10)}</strong>
+        </article>
+      </div>
+      {tasks.length ? (
+        <section className="panel">
+          <h3>Recent work</h3>
+          {tasks.slice(0, 5).map((t) => (
+            <p key={t.id}>
+              <strong>{t.title}</strong>{" "}
+              <span className="muted">{t.status}</span>
+            </p>
+          ))}
+        </section>
+      ) : (
+        empty
+      )}
+    </>
+  );
+}
+function Projects({ setError }: { setError: (v: string) => void }) {
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [tasks, setTasks] = useState<Task[]>([]);
+  const [showProject, setShowProject] = useState(false);
+  const [showTask, setShowTask] = useState(false);
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  const [title, setTitle] = useState("");
+  const [selectedProject, setSelectedProject] = useState("");
+  const [selected, setSelected] = useState<Task>();
+  const refresh = () =>
+    Promise.all([list<Project>("/projects"), list<Task>("/tasks")])
+      .then(([p, t]) => {
+        setProjects(p);
+        setTasks(t);
+      })
+      .catch((e) => setError(e.message));
+  useEffect(() => {
+    refresh();
+  }, []);
+  const createProject = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      await api("/projects", {
+        method: "POST",
+        body: JSON.stringify({ name, description }),
+      });
+      setName("");
+      setDescription("");
+      setShowProject(false);
+      refresh();
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+  const createTask = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      await api("/tasks", {
+        method: "POST",
+        body: JSON.stringify({
+          title,
+          description: "",
+          project_id: selectedProject || undefined,
+        }),
+      });
+      setTitle("");
+      setSelectedProject("");
+      setShowTask(false);
+      refresh();
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+  return (
+    <>
+      <div className="toolbar">
+        <div>
+          <h2>Projects and tasks</h2>
+          <p className="muted">
+            Create work, inspect immutable task versions, and build proposals.
+          </p>
+        </div>
+        <button className="button" onClick={() => setShowProject(true)}>
+          ＋ New project
+        </button>
+        <button className="primary" onClick={() => setShowTask(true)}>
+          ＋ New task
+        </button>
+      </div>
+      {showProject && (
+        <form className="composer" onSubmit={createProject}>
+          <label>
+            Project name
+            <input
+              required
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+            />
+          </label>
+          <label>
+            Description
+            <textarea
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+            />
+          </label>
+          <button className="primary">Create project</button>
+        </form>
+      )}
+      {showTask && (
+        <form className="composer" onSubmit={createTask}>
+          <label>
+            Task title
+            <input
+              required
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+            />
+          </label>
+          <label>
+            Project (optional)
+            <select value={selectedProject} onChange={(e) => setSelectedProject(e.target.value)}>
+              <option value="">No project</option>
+              {projects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+            </select>
+          </label>
+          <button className="primary">Create task</button>
+        </form>
+      )}
+      <div className="project-list">
+        {projects.map((p) => (
+          <div className="project-row" key={p.id}>
+            <div className="project-glyph">{p.name?.[0] || "P"}</div>
+            <div>
+              <strong>{p.name}</strong>
+              <p className="muted">{p.description || "No description"}</p>
+            </div>
+            <span className="count">
+              {tasks.filter((t) => t.project_id === p.id).length} tasks
+            </span>
+          </div>
+        ))}
+        {!projects.length && empty}
+      </div>
+      <h3 className="subhead">Task board</h3>
+      <div className="board">
+        {statuses.map((status) => (
+          <div className="lane" key={status}>
+            <div className="lane-head">
+              <span>{status.replace("_", " ")}</span>
+              <b>{tasks.filter((t) => t.status === status).length}</b>
+            </div>
+            {tasks
+              .filter((t) => t.status === status)
+              .map((t) => (
+                <button
+                  className="task-card"
+                  key={t.id}
+                  onClick={() => setSelected(t)}
+                >
+                  <strong>{t.title}</strong>
+                  <span className="muted">v{t.version}</span>
+                </button>
+              ))}
+          </div>
+        ))}
+      </div>
+      {selected && (
+        <TaskDetail
+          task={selected}
+          close={() => setSelected(undefined)}
+          refresh={refresh}
+          setError={setError}
+        />
+      )}
+    </>
+  );
+}
+export function TaskDetail({
+  task,
+  close,
+  refresh,
+  setError,
+}: {
+  task: Task;
+  close: () => void;
+  refresh: () => void;
+  setError: (v: string) => void;
+}) {
+  const [parent, setParent] = useState("");
+  const [proposal, setProposal] = useState(false);
+  const [summary, setSummary] = useState("");
+  const [integration, setIntegration] =
+    useState<Operation["integration"]>("inventory");
+  const [action, setAction] = useState<Operation["action"]>("adjust");
+  const [target, setTarget] = useState("");
+  const [targetVersion, setTargetVersion] = useState<number>();
+  const [targetVersionError, setTargetVersionError] = useState("");
+  const [values, setValues] = useState<Record<string, string>>({
+    delta: "0",
+    recipients: "",
+    subject: "",
+    body: "",
+    bcc: "",
+    attachments: "",
+    title: "",
+    content: "",
+  });
+  const update = (key: string, value: string) =>
+    setValues((v) => ({ ...v, [key]: value }));
+  const cancel = async () => {
+    try {
+      await api(`/tasks/${task.id}/cancel`, {
+        method: "POST",
+        body: JSON.stringify({ expected_version: task.version }),
+      });
+      refresh();
+      close();
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+  const dependency = async () => {
+    try {
+      await api(`/tasks/${task.id}/dependencies`, {
+        method: "POST",
+        body: JSON.stringify({ parent_id: parent }),
+      });
+      setParent("");
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+  const submitProposal = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (targetVersion === undefined) {
+      setError(targetVersionError || "Capture the target's current version before creating a proposal.");
+      return;
+    }
+    try {
+      await api(`/tasks/${task.id}/proposals`, {
+        method: "POST",
+        body: JSON.stringify({
+          summary,
+          operations: [
+            {
+              integration,
+              action,
+              target_id: target,
+              expected_version: targetVersion,
+              payload: operationPayload(integration, values),
+            },
+          ],
+        }),
+      });
+      setProposal(false);
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+  return (
+    <div className="modal">
+      <div className="panel">
+        <button className="icon-button" onClick={close}>
+          ×
+        </button>
+        <p className="eyebrow">TASK DETAIL</p>
+        <h2>{task.title}</h2>
+        <p>{task.description || "No description"}</p>
+        <p className="muted">
+          Status: {task.status} · Frozen version: {task.version}
+        </p>
+        <div className="toolbar">
+          <button
+            className="button"
+            onClick={cancel}
+            disabled={task.status === "cancelled"}
+          >
+            Cancel task
+          </button>
+          <button className="primary" onClick={() => setProposal(true)}>
+            Build proposal
+          </button>
+        </div>
+        <label>
+          Parent task ID
+          <input
+            value={parent}
+            onChange={(e) => setParent(e.target.value)}
+            placeholder="Known opaque task ID"
+          />
+        </label>
+        <button className="button" onClick={dependency} disabled={!parent}>
+          Add dependency
+        </button>
+        <HandoffForms task={task} setError={setError} onAccepted={refresh} />
+        {proposal && (
+          <form className="composer" onSubmit={submitProposal}>
+            <label>
+              Summary
+              <input
+                required
+                value={summary}
+                onChange={(e) => setSummary(e.target.value)}
+              />
+            </label>
+            <label>
+              Integration
+              <select
+                value={integration}
+                onChange={(e) => {
+                  const i = e.target.value as Operation["integration"];
+                  setIntegration(i);
+                  setAction(
+                    i === "inventory"
+                      ? "adjust"
+                      : i === "mail"
+                        ? "send"
+                        : "update",
+                  );
+                }}
+              >
+                {["inventory", "mail", "documents"].map((i) => (
+                  <option key={i}>{i}</option>
+                ))}
+              </select>
+            </label>
+            <label>
+              Action
+              <input readOnly value={action} />
+            </label>
+            <label>
+              Target ID
+              <input
+                required
+                value={target}
+                onChange={(e) => setTarget(e.target.value)}
+              />
+            </label>
+            <button type="button" className="button" disabled={!target} onClick={async () => {
+              setTargetVersionError("");
+              try {
+                const rows = await list<any>(`/integrations/${integration}/records`);
+                const record = rows.find((r) => String(r.id ?? r.record_id) === target);
+                if (!record || typeof record.version !== "number") throw new Error("Target record not found or has no version.");
+                setTargetVersion(record.version);
+              } catch (e) {
+                setTargetVersion(undefined);
+                setTargetVersionError((e as Error).message);
+              }
+            }}>Capture target version</button>
+            <p className="muted" role="status">{targetVersion !== undefined ? `Captured version: v${targetVersion}` : targetVersionError || "No target version captured; new records are not auto-approved."}</p>
+            {integration === "inventory" && (
+              <label>
+                Delta
+                <input
+                  type="number"
+                  required
+                  value={values.delta}
+                  onChange={(e) => update("delta", e.target.value)}
+                />
+              </label>
+            )}
+            {integration === "mail" && (
+              <>
+                <label>
+                  Recipients (comma separated)
+                  <input
+                    required
+                    value={values.recipients}
+                    onChange={(e) => update("recipients", e.target.value)}
+                  />
+                </label>
+                <label>
+                  Subject
+                  <input
+                    required
+                    value={values.subject}
+                    onChange={(e) => update("subject", e.target.value)}
+                  />
+                </label>
+                <label>
+                  Body
+                  <textarea
+                    required
+                    value={values.body}
+                    onChange={(e) => update("body", e.target.value)}
+                  />
+                </label>
+                <label>
+                  Bcc (comma separated)
+                  <input
+                    required
+                    value={values.bcc}
+                    onChange={(e) => update("bcc", e.target.value)}
+                  />
+                </label>
+                <label>
+                  Attachments (simulator refs, comma separated)
+                  <input
+                    required
+                    value={values.attachments}
+                    onChange={(e) => update("attachments", e.target.value)}
+                  />
+                </label>
+              </>
+            )}
+            {integration === "documents" && (
+              <>
+                <label>
+                  Title
+                  <input
+                    value={values.title}
+                    onChange={(e) => update("title", e.target.value)}
+                  />
+                </label>
+                <label>
+                  Content
+                  <textarea
+                    value={values.content}
+                    onChange={(e) => update("content", e.target.value)}
+                  />
+                </label>
+              </>
+            )}
+            <button className="primary">Create proposal</button>
+          </form>
+        )}
+      </div>
+    </div>
+  );
+}
+function Decisions({
+  me,
+  setError,
+}: {
+  me: Me;
+  setError: (v: string) => void;
+}) {
+  const [items, setItems] = useState<any[]>([]);
+  const [selected, setSelected] = useState<any>();
+  const load = () =>
+    list<any>("/decisions")
+      .then((x) => {
+        setItems(x);
+        setSelected(undefined);
+      })
+      .catch((e) => setError(e.message));
+  useEffect(() => {
+    load();
+  }, []);
+  return (
+    <>
+      <div className="toolbar">
+        <div>
+          <h2>My decisions</h2>
+          <p className="muted">Role-scoped review of frozen revisions.</p>
+        </div>
+        <button className="button" onClick={load}>
+          Refresh
+        </button>
+      </div>
+      <div className="decision-layout">
+        <div className="decision-list">
+          {items.map((i) => (
+            <button
+              className={
+                selected?.id === i.id ? "decision selected" : "decision"
+              }
+              key={i.id}
+              onClick={() => setSelected(i)}
+            >
+              <span className="decision-kind">{i.kind}</span>
+              <strong>{i.title}</strong>
+              <span className="muted">
+                Revision {i.revision} · {i.status}
+              </span>
+            </button>
+          ))}
+          {!items.length && empty}
+        </div>
+        {selected ? (
+          <Review
+            key={selected.id}
+            item={selected}
+            me={me}
+            setError={setError}
+            onDecision={load}
+          />
+        ) : (
+          <div className="review">
+            <p className="muted">
+              Select a decision to inspect its frozen revision.
+            </p>
+          </div>
+        )}
+      </div>
+    </>
+  );
+}
+function Review({
+  item,
+  me,
+  setError,
+  onDecision,
+}: {
+  item: any;
+  me: Me;
+  setError: (v: string) => void;
+  onDecision: () => void;
+}) {
+  const [prop, setProp] = useState<Proposal>();
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    setProp(undefined);
+    api<Proposal>(`/proposals/${item.proposal_id}`)
+      .then(setProp)
+      .catch((e) => setError(e.message));
+  }, [item, setError]);
+  if (!prop)
+    return (
+      <div className="review">
+        <p className="muted">Loading frozen revision…</p>
+      </div>
+    );
+  const frozen = prop.revision !== item.revision || prop.digest !== item.digest;
+  const act = async (kind: "endorse" | "approve" | "reject") => {
+    setBusy(true);
+    try {
+      await api(`/proposals/${prop.id}/${kind}`, {
+        method: "POST",
+        body: JSON.stringify({
+          revision: item.revision,
+          digest: item.digest,
+          ...(kind === "reject" ? { reason: "Rejected in control room" } : {}),
+        }),
+      });
+      onDecision();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="review">
+      <div className="review-banner">
+        {frozen
+          ? "This proposal changed; refresh required."
+          : "Revision frozen for review."}
+      </div>
+      <div className="review-head">
+        <div>
+          <span className="eyebrow">PROPOSAL {prop.id}</span>
+          <h2>{prop.summary}</h2>
+        </div>
+        <div className="revision">
+          REV {prop.revision}
+          <br />
+          <span className="mono">{prop.digest.slice(0, 16)}</span>
+        </div>
+      </div>
+      <p className="muted">
+        {prop.operations.length} typed operation
+        {prop.operations.length !== 1 ? "s" : ""} · No provider writes occur
+        without approval.
+      </p>
+      <div className="operations">
+        {prop.operations.map((op, i) => (
+          <OperationPreview key={op.id || i} op={op} />
+        ))}
+      </div>
+      <div className="review-actions">
+        <button
+          className="button"
+          disabled={
+            busy ||
+            frozen ||
+            item.revision !== prop.revision ||
+            item.digest !== prop.digest
+          }
+          onClick={() => act("reject")}
+        >
+          Reject
+        </button>
+        <button
+          className="button"
+          disabled={busy || frozen}
+          onClick={() => act("endorse")}
+        >
+          Endorse
+        </button>
+        <button
+          className="primary"
+          disabled={busy || frozen || !canApprove(me.role)}
+          onClick={() => act("approve")}
+        >
+          {canApprove(me.role) ? "Approve" : "Approve · approver only"}
+        </button>
+      </div>
+    </div>
+  );
+}
+function OperationPreview({ op }: { op: Operation }) {
+  return (
+    <div className="op">
+      <div className="op-title">
+        <span className="integration-dot">
+          {op.integration[0].toUpperCase()}
+        </span>
+        <strong>
+          {op.integration} / {op.action}
+        </strong>
+        <span className="tag">SIMULATOR</span>
+      </div>
+      <div className="op-target">
+        <span className="label">TARGET</span>
+        <code>{op.target_id}</code>
+        <span className="label">EXPECTED VERSION</span>
+        <code>v{op.expected_version}</code>
+      </div>
+      <dl className="typed-fields">
+        {Object.entries(op.payload).map(([k, v]) => (
+          <div key={k}>
+            <dt>{k}</dt>
+            <dd>{Array.isArray(v) ? v.join(", ") || "(empty)" : String(v)}</dd>
+          </div>
+        ))}
+      </dl>
+      <pre>{JSON.stringify(op.payload, null, 2)}</pre>
+    </div>
+  );
+}
+function Integrations({ setError }: { setError: (v: string) => void }) {
+  const [items, setItems] = useState<any[]>([]);
+  const [records, setRecords] = useState<Record<string, any[]>>({});
+  useEffect(() => {
+    list<any>("/integrations")
+      .then(setItems)
+      .catch((e) => setError(e.message));
+  }, []);
+  const read = async (id: string) => {
+    try {
+      const rows = await list<any>(`/integrations/${id}/records`);
+      setRecords((r) => ({ ...r, [id]: rows }));
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+  return (
+    <>
+      <div className="toolbar">
+        <div>
+          <h2>Integrations</h2>
+          <p className="muted">
+            Read-only simulator records. Proposal actions are gated.
+          </p>
+        </div>
+      </div>
+      <div className="integration-grid">
+        {items.map((x) => (
+          <article className="integration" key={x.id}>
+            <div className="integration-top">
+              <span className="big-icon">
+                {x.name?.[0] || x.id?.[0] || "I"}
+              </span>
+              <span className="tag">
+                {x.simulation ? "SIMULATOR" : "UNAVAILABLE"}
+              </span>
+            </div>
+            <h3>{x.name || x.id}</h3>
+            <p className="muted">{x.kind || "Integration"}</p>
+            <div className="chips">
+              {(x.actions || []).map((a: string) => (
+                <span key={a}>{a}</span>
+              ))}
+            </div>
+            <button className="button" onClick={() => read(x.id)}>
+              Read records
+            </button>
+            {records[x.id] && (
+              <pre className="records">
+                {JSON.stringify(records[x.id], null, 2)}
+              </pre>
+            )}
+          </article>
+        ))}
+        {!items.length && empty}
+      </div>
+    </>
+  );
+}
+function Agents({ setError }: { setError: (v: string) => void }) {
+  const [items, setItems] = useState<any[]>([]);
+  const [show, setShow] = useState(false);
+  const [name, setName] = useState("");
+  const [harness, setHarness] = useState("");
+  const [owner, setOwner] = useState("");
+  const [capabilities, setCapabilities] = useState("");
+  useEffect(() => {
+    list<any>("/agents")
+      .then(setItems)
+      .catch((e) => setError(e.message));
+  }, []);
+  const register = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      const agent = await api<any>("/agents", {
+        method: "POST",
+        body: JSON.stringify({
+          name,
+          harness,
+          owner_id: owner,
+          capabilities: capabilities
+            .split(",")
+            .map((x) => x.trim())
+            .filter(Boolean),
+        }),
+      });
+      setItems((a) => [...a, agent]);
+      setShow(false);
+      setName("");
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+  return (
+    <>
+      <div className="toolbar">
+        <div>
+          <h2>Agent registry</h2>
+          <p className="muted">
+            Registration metadata only; unavailable harnesses are not runnable.
+          </p>
+        </div>
+        <button className="primary" onClick={() => setShow(true)}>
+          ＋ Register agent
+        </button>
+      </div>
+      {show && (
+        <form className="composer" onSubmit={register}>
+          <label>
+            Name
+            <input
+              required
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+            />
+          </label>
+          <label>
+            Harness
+            <input
+              required
+              value={harness}
+              onChange={(e) => setHarness(e.target.value)}
+              placeholder="Harness identifier"
+            />
+          </label>
+          <label>
+            Owner person ID
+            <input
+              required
+              value={owner}
+              onChange={(e) => setOwner(e.target.value)}
+            />
+          </label>
+          <label>
+            Capabilities
+            <input
+              value={capabilities}
+              onChange={(e) => setCapabilities(e.target.value)}
+            />
+          </label>
+          <button className="primary">Register</button>
+        </form>
+      )}
+      <div className="table">
+        {items.map((a) => (
+          <div className="table-row" key={a.id}>
+            <div>
+              <strong>{a.name}</strong>
+              <span className="muted">
+                {a.harness || "harness unavailable"}
+              </span>
+            </div>
+            <span className="status-chip">{a.status || "unavailable"}</span>
+            <div className="chips">
+              {(a.capabilities || []).map((x: string) => (
+                <span key={x}>{x}</span>
+              ))}
+            </div>
+          </div>
+        ))}
+        {!items.length && empty}
+      </div>
+    </>
+  );
+}
+function Activity({ setError }: { setError: (v: string) => void }) {
+  const [events, setEvents] = useState<any[]>([]);
+  const [receipts, setReceipts] = useState<any[]>([]);
+  useEffect(() => {
+    Promise.all([list<any>("/events"), list<any>("/receipts")])
+      .then(([e, r]) => {
+        setEvents(e);
+        setReceipts(r);
+      })
+      .catch((e) => setError(e.message));
+  }, []);
+  return (
+    <>
+      <div className="toolbar">
+        <h2>Activity and receipts</h2>
+      </div>
+      <div className="activity-grid">
+        <article className="panel">
+          <h3>Events</h3>
+          {events.map((e, i) => (
+            <div className="event" key={e.id || i}>
+              <strong>{e.event_type || "Event"}</strong>
+              <p className="muted">
+                {e.created_at || "Recorded event"} · {e.payload ? JSON.stringify(e.payload) : ""}
+              </p>
+            </div>
+          ))}
+          {!events.length && <p className="muted">No events returned.</p>}
+        </article>
+        <article className="panel">
+          <h3>Receipts</h3>
+          {receipts.map((r, i) => (
+            <div className="receipt" key={r.id || i}>
+              <strong>{r.kind || "Receipt"} · {r.outcome_code || "unknown outcome"}</strong>
+              <p className="muted mono">{r.result ? JSON.stringify(r.result) : "No result"} · {r.effect_id || r.id || "No effect"}</p>
+            </div>
+          ))}
+          {!receipts.length && <p className="muted">No receipts returned.</p>}
+        </article>
+      </div>
+    </>
+  );
+}
+if (typeof document !== "undefined" && document.getElementById("root")) {
+  createRoot(document.getElementById("root")!).render(<App />);
+}

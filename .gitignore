@@ -1,0 +1,13 @@
+.env
+.env.*
+!.env.example
+*.local
+bin/
+node_modules/
+web/node_modules/
+web/dist/
+web/coverage/
+coverage.out
+*.log
+.DS_Store
+__pycache__/

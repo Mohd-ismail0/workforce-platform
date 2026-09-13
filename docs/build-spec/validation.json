@@ -1,0 +1,70 @@
+{
+  "status": "pass",
+  "scope": "document structure and references only; runtime scenarios NOT RUN",
+  "documents": 6,
+  "scenario_count": 52,
+  "invariant_count": 20,
+  "race_protocol_count": 10,
+  "milestone_count": 13,
+  "milestone_dependencies": {
+    "PD-00": [],
+    "PD-01": [
+      "PD-00"
+    ],
+    "PD-02": [
+      "PD-00",
+      "PD-01"
+    ],
+    "PD-03": [
+      "PD-00",
+      "PD-01",
+      "PD-02"
+    ],
+    "PD-04": [
+      "PD-00",
+      "PD-01",
+      "PD-02"
+    ],
+    "PD-05": [
+      "PD-01",
+      "PD-02",
+      "PD-03",
+      "PD-04"
+    ],
+    "PD-06": [
+      "PD-01",
+      "PD-03",
+      "PD-05"
+    ],
+    "PD-07": [
+      "PD-05",
+      "PD-06"
+    ],
+    "PD-08": [
+      "PD-07"
+    ],
+    "PD-09": [
+      "PD-04",
+      "PD-05"
+    ],
+    "PD-10": [
+      "PD-00",
+      "PD-06",
+      "PD-09"
+    ],
+    "PD-11": [
+      "PD-05",
+      "PD-08",
+      "PD-09",
+      "PD-10"
+    ],
+    "PD-12": [
+      "PD-06",
+      "PD-08",
+      "PD-09",
+      "PD-10",
+      "PD-11"
+    ]
+  },
+  "errors": []
+}
