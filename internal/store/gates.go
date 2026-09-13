@@ -21,6 +21,10 @@ var (
 	ErrGateRevision        = errors.New("gate revision mismatch")
 	ErrGateAlreadyResolved = errors.New("gate already resolved")
 	ErrGateInvalidResponse = errors.New("invalid gate response")
+	// ErrGateInvalidSchema means the question asks for something this platform cannot
+	// record as an answer. Such a gate must be REFUSED at creation: a question that can
+	// be asked but never answered parks a run forever with no signal to anyone.
+	ErrGateInvalidSchema = errors.New("unsupported gate input schema")
 )
 
 type Gate struct {
@@ -153,16 +157,8 @@ func validateGateResponse(schema, response json.RawMessage) error {
 	if len(schema) == 0 || bytes.Equal(bytes.TrimSpace(schema), []byte("{}")) {
 		return nil
 	}
-	var spec struct {
-		Properties map[string]struct {
-			Type string `json:"type"`
-		} `json:"properties"`
-		Requested map[string]struct {
-			Type string `json:"type"`
-		} `json:"requested"`
-		Required []string `json:"required"`
-	}
-	if json.Unmarshal(schema, &spec) != nil {
+	spec, err := parseGateSchema(schema)
+	if err != nil {
 		return ErrGateInvalidResponse
 	}
 	props := spec.Properties
@@ -184,40 +180,7 @@ func validateGateResponse(schema, response json.RawMessage) error {
 		if dec.Decode(&v) != nil {
 			return ErrGateInvalidResponse
 		}
-		switch p.Type {
-		case "string":
-			if _, ok := v.(string); !ok {
-				return ErrGateInvalidResponse
-			}
-		case "integer":
-			num, ok := v.(json.Number)
-			if !ok {
-				return ErrGateInvalidResponse
-			}
-			// Rejects fractions ("2.5"), exponents that are not whole ("1e300"
-			// overflows int64), and non-numeric literals in one step.
-			iv, err := num.Int64()
-			if err != nil {
-				return ErrGateInvalidResponse
-			}
-			// Beyond 2^53 an integer is not exactly representable as float64, so
-			// downstream arithmetic could silently change it.
-			if iv > maxExactInteger || iv < -maxExactInteger {
-				return ErrGateInvalidResponse
-			}
-		case "number":
-			num, ok := v.(json.Number)
-			if !ok {
-				return ErrGateInvalidResponse
-			}
-			if f, err := num.Float64(); err != nil || math.IsNaN(f) || math.IsInf(f, 0) {
-				return ErrGateInvalidResponse
-			}
-		case "boolean":
-			if _, ok := v.(bool); !ok {
-				return ErrGateInvalidResponse
-			}
-		default:
+		if !gateValueAllowed(v, p) {
 			return ErrGateInvalidResponse
 		}
 	}
@@ -286,4 +249,133 @@ func (s *Store) ResolveGate(ctx context.Context, org, id, actor string, rev int6
 		g, e = s.GetGate(ctx, org, id)
 	}
 	return g, e
+}
+
+// gateField is one declared input field. A gate may ask for a scalar, or for an array
+// of scalars: a real model asked for `recipients` as an array of strings, which is
+// exactly what the mail connector needs, and the previous scalar-only validator
+// rejected every answer to that question.
+type gateField struct {
+	Type  string `json:"type"`
+	Items *struct {
+		Type string `json:"type"`
+	} `json:"items"`
+}
+
+type gateSchema struct {
+	Properties map[string]gateField `json:"properties"`
+	Requested  map[string]gateField `json:"requested"`
+	Required   []string             `json:"required"`
+}
+
+func parseGateSchema(schema json.RawMessage) (gateSchema, error) {
+	var spec gateSchema
+	if json.Unmarshal(schema, &spec) != nil {
+		return spec, errors.New("unparsable schema")
+	}
+	return spec, nil
+}
+
+// maxGateArrayItems bounds an array answer. Input is bounded wherever it enters the
+// system, and this is an entry point.
+const maxGateArrayItems = 64
+
+// gateValueAllowed reports whether v satisfies the declared field.
+func gateValueAllowed(v any, f gateField) bool {
+	switch f.Type {
+	case "array":
+		if f.Items == nil {
+			return false
+		}
+		list, ok := v.([]any)
+		if !ok || len(list) > maxGateArrayItems {
+			return false
+		}
+		for _, item := range list {
+			if !scalarAllowed(item, f.Items.Type) {
+				return false
+			}
+		}
+		return true
+	default:
+		return scalarAllowed(v, f.Type)
+	}
+}
+
+// scalarAllowed applies the exactness rules for one scalar value. Integers use
+// json.Number so a value above 2^53 is refused rather than silently rounded.
+func scalarAllowed(v any, typeName string) bool {
+	switch typeName {
+	case "string":
+		_, ok := v.(string)
+		return ok
+	case "integer":
+		num, ok := v.(json.Number)
+		if !ok {
+			return false
+		}
+		iv, err := num.Int64()
+		if err != nil {
+			return false
+		}
+		return iv <= maxExactInteger && iv >= -maxExactInteger
+	case "number":
+		num, ok := v.(json.Number)
+		if !ok {
+			return false
+		}
+		f, err := num.Float64()
+		return err == nil && !math.IsNaN(f) && !math.IsInf(f, 0)
+	case "boolean":
+		_, ok := v.(bool)
+		return ok
+	}
+	return false
+}
+
+// ValidateGateSchema refuses a question whose answer this platform could not record.
+//
+// Called BEFORE a gate is persisted. Without it a harness can park a run on a question
+// every answer fails validation against, which is a dead end rather than a pause.
+func ValidateGateSchema(schema json.RawMessage) error {
+	if len(bytes.TrimSpace(schema)) == 0 || bytes.Equal(bytes.TrimSpace(schema), []byte("{}")) {
+		// An unconstrained question accepts any object; nothing to check.
+		return nil
+	}
+	spec, err := parseGateSchema(schema)
+	if err != nil {
+		return ErrGateInvalidSchema
+	}
+	props := spec.Properties
+	if props == nil {
+		props = spec.Requested
+	}
+	if len(props) == 0 {
+		return ErrGateInvalidSchema
+	}
+	for _, f := range props {
+		switch f.Type {
+		case "string", "integer", "number", "boolean":
+		case "array":
+			if f.Items == nil || !scalarTypeSupported(f.Items.Type) {
+				return ErrGateInvalidSchema
+			}
+		default:
+			return ErrGateInvalidSchema
+		}
+	}
+	for _, name := range spec.Required {
+		if _, declared := props[name]; !declared {
+			return ErrGateInvalidSchema
+		}
+	}
+	return nil
+}
+
+func scalarTypeSupported(t string) bool {
+	switch t {
+	case "string", "integer", "number", "boolean":
+		return true
+	}
+	return false
 }

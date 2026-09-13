@@ -26,6 +26,10 @@ import urllib.error
 import urllib.request
 
 ORG, REQ, APP, ADM, REC, TOKN, RUNNER = sys.argv[1:8]
+# Optional: the database URL, used ONLY to verify proposal-linked readback and the
+# exact target version. The join lives in the schema; the receipts API does not
+# expose it, and asserting a field that does not exist proved nothing.
+DB_URL = sys.argv[8] if len(sys.argv) > 8 else ""
 
 BASE = "http://127.0.0.1:8095/api/v1"
 TOKENS = {(ORG, REQ): TOKN, (ORG, APP): TOKN + "b", (ORG, ADM): TOKN + "c"}
@@ -126,6 +130,8 @@ FACTS = {
     "subject": "Stock adjustment request",
     "body": "Requesting a stock adjustment of 7 units.",
 }
+# Field names map to PREDECLARED facts only. No name is guessed and no boolean is
+# invented; an unmapped or unbuildable required field aborts the acceptance instead.
 NAME_MAP = {
     "supplier_email": "email", "recipient_email": "email", "recipient": "email",
     "to": "email", "email": "email", "recipients": "email",
@@ -134,15 +140,52 @@ NAME_MAP = {
     "reference": "business_ref", "supplier_reference": "business_ref",
     "subject": "subject", "body": "body", "message": "body", "content": "body",
 }
+def coerce(value, spec):
+    """Shape a predeclared fact to the type the model actually asked for.
+
+    The strict acceptance previously failed with 422 because the model asked for
+    `recipients` as an ARRAY of strings and the driver sent a bare string. Sending a
+    value that does not match the declared type is the driver's bug, not the model's.
+    Returns (ok, value); an unsupported declared type is reported, never guessed.
+    """
+    t = (spec or {}).get("type", "string")
+    if t == "array":
+        items = (spec or {}).get("items") or {}
+        it = items.get("type")
+        if it == "string":
+            return True, [str(value)]
+        if it == "integer":
+            return True, [int(value)]
+        if it == "number":
+            return True, [float(value)]
+        # An array of anything else cannot be built from the declared facts.
+        return False, None
+    if t == "string":
+        return True, str(value)
+    if t == "integer":
+        return True, int(value)
+    if t == "number":
+        return True, float(value)
+    if t == "boolean":
+        # No predeclared boolean fact exists, and inventing one would be guessing.
+        return False, None
+    return False, None
+
+
 schema = gate.get("input_schema") or {}
-required = schema.get("required") or list((schema.get("properties") or {}).keys())
+props = schema.get("properties") or schema.get("requested") or {}
+required = schema.get("required") or list(props.keys())
 answer, unresolved = {}, []
 for field in required:
     key = NAME_MAP.get(field.lower())
-    if key and key in FACTS:
-        answer[field] = FACTS[key]
-    else:
-        unresolved.append(field)
+    if not (key and key in FACTS):
+        unresolved.append(f"{field} (no predeclared fact)")
+        continue
+    ok, value = coerce(FACTS[key], props.get(field) or {})
+    if not ok:
+        unresolved.append(f"{field} (declared type {(props.get(field) or {}).get('type')} cannot be built)")
+        continue
+    answer[field] = value
 check("every required field maps to a PREDECLARED fact", unresolved, [])
 if unresolved:
     print("    the model asked for facts this qualification does not declare:", unresolved)
@@ -205,15 +248,32 @@ check("independent approver approved",
 done = poll(f"/proposals/{pid}", {"done", "needs_attention"})
 check("proposal executed", done.get("status"), "done")
 
-# Proposal-specific readback: a receipt tied to THIS proposal's effect.
-_, rcp = call("requester", "GET", "/receipts")
-linked = False
-for r in rcp.get("items", []):
-    if r.get("proposal_id") == pid or r.get("effect_id"):
-        # Only count it if it references this proposal where the field exists.
-        if r.get("proposal_id") == pid:
-            linked = True
-check("a receipt references THIS proposal", linked, True)
+# Proposal-specific readback, checked where the linkage actually exists:
+# receipts.effect_id -> effects.proposal_id. (The earlier version asserted a
+# proposal_id field on the receipts API, which does not exist, so it could never pass.)
+linked = 0
+final_version = None
+if DB_URL:
+    import psycopg
+    with psycopg.connect(DB_URL, connect_timeout=10) as c:
+        with c.transaction():
+            c.execute("select set_config('app.org_id', %s, true)", (ORG,))
+            linked = c.execute(
+                """SELECT count(*)
+                     FROM receipts r
+                     JOIN effects e ON e.id = r.effect_id
+                    WHERE e.org_id = %s AND e.proposal_id = %s""",
+                (ORG, pid)).fetchone()[0]
+            final_version = c.execute(
+                "SELECT version FROM simulator_records WHERE org_id = %s AND id = %s",
+                (ORG, REC)).fetchone()[0]
+    check("a receipt is linked to THIS proposal's effect", linked >= 1, True)
+    # The target must advance by EXACTLY one version: an effect applied twice would show
+    # as +2, and no effect would leave it unchanged.
+    check("the target advanced by exactly one version", final_version, (before_version or 0) + 1)
+else:
+    print("    (no DB URL supplied: proposal-linked readback and exact target version "
+          "are NOT verified by this run)")
 
 failed = [n for n, good in results if not good]
 print()

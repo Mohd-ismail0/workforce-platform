@@ -256,6 +256,12 @@ func (s *Store) ExecuteAgentRun(ctx context.Context, org, id string) error {
 			if len(tag) == 0 {
 				tag = []byte(`{}`)
 			}
+			// A question the platform cannot record an answer to must be refused HERE,
+			// not persisted. Otherwise the run parks in 'waiting' while every answer
+			// fails validation, which is a dead end rather than a pause.
+			if e := ValidateGateSchema(tag); e != nil {
+				return publishError{code: "invalid_gate_schema"}
+			}
 			q, e := tx.Exec(ctx, "insert into decision_gates(id,org_id,task_id,run_id,kind,prompt,input_schema,respondent_id,created_by) values($1,$2,$3,$4,$5,$6,$7,$8,$9) on conflict do nothing", gid, org, task, id, res.Gate.Kind, res.Gate.Prompt, tag, rid, initiator)
 			if e != nil {
 				return e

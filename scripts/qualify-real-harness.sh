@@ -105,7 +105,7 @@ echo "  api=$APIPID worker=$WPID"
 for _ in $(seq 1 40); do curl -fsS http://127.0.0.1:8095/ready >/dev/null 2>&1 && break; sleep 1; done
 curl -fsS http://127.0.0.1:8095/ready || { echo "API not ready"; tail -10 "$API_LOG"; exit 1; }
 
-python3 /home/prod/repos/workforce-platform/scripts/qualify_pause_accept.py "$ORG" "$REQ" "$APP" "$ADM" "$REC" "$TOK" "$RUNNER"
+python3 /home/prod/repos/workforce-platform/scripts/qualify_pause_accept.py "$ORG" "$REQ" "$APP" "$ADM" "$REC" "$TOK" "$RUNNER" "$DATABASE_URL"
 QUAL=$?
 
 echo

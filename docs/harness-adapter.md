@@ -154,17 +154,25 @@ Recorded from real invocations of the pinned binary, not from documentation alon
 
 | Stage | State | Evidence |
 |---|---|---|
-| Binary installed | **yes** | `@anthropic-ai/claude-code@2.1.270`, platform package `-linux-x64`; the vendor's own `install.cjs` placed the native binary (the npm postinstall was blocked by npm 12's script policy, so the platform package was installed explicitly and the audited placement step run directly) |
+| Binary installed | **yes** | `@anthropic-ai/claude-code@2.1.270`, platform package `-linux-x64`. The npm postinstall is blocked by npm 12's script policy, so the platform package is installed explicitly and the vendor's own audited `install.cjs` runs the placement step (link/copy + chmod only — no network, no arbitrary scripts) |
 | Executable runs | **yes** | `claude --version` reports the version; it returns real vendor envelopes |
-| Authenticated | **reaches the provider** | a call returns `api_error_status: 400` with `result: "Credit balance is too low"` — a **billing** response, not an authentication failure |
-| Model response verified | **no — blocked on gateway credit** | the unified gateway advertises 24 models including `claude-sonnet-5` and `claude-opus-5`, and rejects calls for want of balance |
-| Platform loop qualified | **mechanism only** | 55/55 through a real process boundary using a deterministic double; no model-backed run yet |
+| Authenticated | **yes** | calls reach the gateway and bill successfully (`total_cost_usd` non-zero on completed turns) |
+| Model response verified | **yes** | `gpt-5-mini` via the operator's gateway over HTTPS, `terminal_reason: "completed"`, `is_error: false` |
+| Model-backed pause/resume | **yes — 30/30** | `scripts/qualify-real-harness.sh` + `scripts/qualify_pause_accept.py`: a real model returned `waiting`, the gate persisted and routed to the accountable owner, an independent run was processed while the first held no worker slot, the answer was accepted, and a **fresh invocation** resumed to a proposal awaiting endorsement |
+| Governed execution | **yes, against simulators** | endorsement, requester self-approval refused (409), a different approver, execution, a receipt linked to that proposal's effect, and the target advancing exactly one version |
 | Tool-enabled production readiness | **no** | see the isolation section: no kernel containment on this host |
 
-The remaining blocker is an operator spend decision on the gateway the user already
-uses. No credential is scraped from another service, and none is needed from the
-chat: the harness reads `ANTHROPIC_BASE_URL` / `ANTHROPIC_API_KEY` through the
-runner's explicit environment allowlist from a mode-600 operator file.
+What the 30/30 does **not** establish: any real external effect (the connectors are
+simulators), kernel containment, or human usability (the answer was supplied by a
+script standing in for a person, and is labelled as such in the output).
+
+An earlier attempt returned `api_error_status: 400` with `result: "Credit balance is
+too low"`, which turned out to be model-specific: the gateway serves many models, and
+only the `claude-*` names were rejected (400). A model the gateway does serve works and
+bills normally. No credential is scraped from another service and none is needed from
+the chat: the harness reads `ANTHROPIC_BASE_URL` / `ANTHROPIC_API_KEY` through the
+runner's explicit environment allowlist from a mode-600 operator file outside the
+repository, and the base URL is HTTPS.
 
 ### The vendor envelope differs from a tidy guess
 
