@@ -53,6 +53,33 @@ connector does not support, or proposes a stale target does not get an effect �
 existing validation rejects it. A harness that wants authorisation asks for it with
 `waiting`; it cannot grant it.
 
+## Reading a real harness's output
+
+Real harnesses do not print our protocol directly, so the adapter unwraps the
+documented shapes rather than making every operator encode their harness's output
+format as configuration:
+
+- **Claude Code** — `claude -p --output-format json` prints one envelope object
+  `{type, subtype, is_error, result, session_id, total_cost_usd, ...}`; the agent's
+  final text is in `result`.
+- **Codex** — `codex exec --json` prints a JSONL event stream; the final message is
+  carried by the last event.
+
+Unwrapping accepts the protocol document directly, an envelope wrapping it as an
+object, an envelope wrapping it as a string, and a JSONL stream, up to a bounded
+nesting depth. A harness that exits 0 while reporting its own failure
+(`is_error: true`, or an `error*` subtype) is treated as **failed** — its text is
+provider diagnostics and never reaches a user-visible field; the run records the
+public code `harness_reported_error` instead.
+
+Output is untrusted input either way. Whatever comes out is still validated by
+`CreateProposal`, business-key reservation, endorsement and approval.
+
+The harness's own session store (Claude Code `--resume <session_id>`, Codex
+`exec resume`) is **not** the platform's durable state: our gates and run records
+are. A paused run is resumed from the persisted answer, not by asking the harness
+to remember.
+
 ## Execution boundary
 
 **This is reduced exposure, NOT a sandbox.** The harness runs as the same unprivileged
@@ -148,7 +175,9 @@ WORKFORCE_RUNNER_ALLOW_UNISOLATED=1
 ```
 
 Then bind work to it with an **ACTIVE** harness release whose manifest names the
-runner: `{"runner_id": "claude-code"}`. The agent definition's `harness` must match
+runner: `{"runner_id": "claude-code"}`. An `active` release means the operator
+promoted *metadata* — it does not mean the platform installed or verified any code,
+and the executable is whatever the operator's environment provides. The agent definition's `harness` must match
 that name. An agent whose harness has no active release is refused; an agent whose
 harness this deployment cannot run is refused with a distinct error rather than
 silently falling back to the simulator.

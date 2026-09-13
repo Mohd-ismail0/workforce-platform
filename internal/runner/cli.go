@@ -28,6 +28,10 @@ const (
 	FailInvalidOutput      = "invalid_output"
 	FailNonzeroExit        = "nonzero_exit"
 	FailInternal           = "internal_error"
+	// FailHarnessReportedError means the harness exited successfully but told us,
+	// through its own envelope, that the run failed. That is not the same as a
+	// transport failure, and the text it carries is provider diagnostics.
+	FailHarnessReportedError = "harness_reported_error"
 	// FailIsolationRequired means the operator has not acknowledged that this
 	// adapter runs the harness as the platform's own unprivileged account.
 	FailIsolationRequired = "isolation_required"
@@ -423,8 +427,11 @@ func (c cliRunner) Run(ctx context.Context, req Request) (Result, error) {
 		return Result{Status: StatusFailed, FailureReason: FailNonzeroExit}, nil
 	}
 
-	var reply cliReply
-	if err := json.Unmarshal(bytes.TrimSpace([]byte(out.String())), &reply); err != nil {
+	reply, perr := extractProtocol([]byte(out.String()))
+	if perr != nil {
+		// The cause goes to the operator log only: a user-visible field carries the
+		// public code, never harness output.
+		log.Printf("harness %q (%s) produced no usable protocol document: %v", c.id, bin, perr)
 		return Result{Status: StatusFailed, FailureReason: FailInvalidOutput}, nil
 	}
 
@@ -544,4 +551,128 @@ func nonNilRecords(in []RecordRef) []RecordRef {
 		return []RecordRef{}
 	}
 	return in
+}
+
+// ---------------------------------------------------------------------------
+// Protocol extraction
+//
+// A harness prints one of several documented shapes. Rather than make every
+// operator encode their harness's shape as configuration, we unwrap the known
+// shapes and fail closed if none of them yields our protocol. Output is untrusted
+// input either way: whatever comes out is still validated by CreateProposal,
+// business-key reservation, endorsement and approval.
+// ---------------------------------------------------------------------------
+
+// envelopeKeys are the field names harnesses use to carry the final agent message.
+var envelopeKeys = []string{"result", "output", "message", "text", "content", "last_message"}
+
+const maxUnwrapDepth = 3
+
+// extractProtocol reads our protocol document out of harness stdout, tolerating a
+// JSON envelope (Claude Code) and a JSONL event stream (Codex).
+func extractProtocol(raw []byte) (cliReply, error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 {
+		return cliReply{}, errors.New("empty output")
+	}
+	if r, ok := tryDecode(trimmed, 0); ok {
+		return r, nil
+	}
+	// JSONL: an event stream's final interesting event carries the result. Keep the
+	// LAST success so a trailing summary event wins over earlier progress events.
+	var last cliReply
+	found := false
+	for _, line := range bytes.Split(trimmed, []byte("\n")) {
+		line = bytes.TrimSpace(line)
+		if len(line) == 0 || line[0] != '{' {
+			continue
+		}
+		if r, ok := tryDecode(line, 0); ok {
+			last, found = r, true
+		}
+	}
+	if found {
+		return last, nil
+	}
+	return cliReply{}, errors.New("no protocol document found in harness output")
+}
+
+// decodeProtocol reports whether b is our protocol document.
+func decodeProtocol(b []byte) (cliReply, bool) {
+	var r cliReply
+	if json.Unmarshal(b, &r) != nil {
+		return r, false
+	}
+	switch r.Status {
+	case StatusSucceeded, StatusWaiting, StatusFailed:
+		return r, true
+	}
+	return r, false
+}
+
+// tryDecode accepts either the protocol document itself or a known envelope
+// wrapping it, without recursing without bound.
+func tryDecode(b []byte, depth int) (cliReply, bool) {
+	var r cliReply
+	if json.Unmarshal(b, &r) != nil {
+		return r, false
+	}
+	switch r.Status {
+	case StatusSucceeded, StatusWaiting, StatusFailed:
+		return r, true
+	}
+	if depth >= maxUnwrapDepth {
+		return r, false
+	}
+
+	// An envelope that reports its own failure must be treated as a failure, not
+	// unwrapped: the text it carries is provider diagnostics, not our protocol.
+	var meta struct {
+		IsError *bool  `json:"is_error"`
+		Subtype string `json:"subtype"`
+		Code    *int   `json:"exit_code"`
+	}
+	if json.Unmarshal(b, &meta) == nil {
+		if meta.IsError != nil && *meta.IsError {
+			return cliReply{Status: StatusFailed, FailureReason: FailHarnessReportedError}, true
+		}
+		if strings.HasPrefix(meta.Subtype, "error") {
+			return cliReply{Status: StatusFailed, FailureReason: FailHarnessReportedError}, true
+		}
+	}
+
+	var obj map[string]json.RawMessage
+	if json.Unmarshal(b, &obj) != nil {
+		return r, false
+	}
+	for _, key := range envelopeKeys {
+		field, ok := obj[key]
+		if !ok {
+			continue
+		}
+		// The field may carry the protocol object directly...
+		if inner, ok := tryDecode(bytes.TrimSpace(field), depth+1); ok {
+			return inner, true
+		}
+		// ...or a string containing it, possibly as further JSONL.
+		var text string
+		if json.Unmarshal(field, &text) == nil {
+			body := strings.TrimSpace(text)
+			if len(body) > 0 && body[0] == '{' {
+				if inner, ok := tryDecode([]byte(body), depth+1); ok {
+					return inner, true
+				}
+				for _, line := range strings.Split(body, "\n") {
+					line = strings.TrimSpace(line)
+					if len(line) == 0 || line[0] != '{' {
+						continue
+					}
+					if inner, ok := tryDecode([]byte(line), depth+1); ok {
+						return inner, true
+					}
+				}
+			}
+		}
+	}
+	return r, false
 }

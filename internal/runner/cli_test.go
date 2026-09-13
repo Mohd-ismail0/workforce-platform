@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -466,5 +467,106 @@ func TestCLIRunnerFailsClosedWithoutIsolationAcknowledgment(t *testing.T) {
 		if res, _ := ok.Run(context.Background(), sampleRequest()); res.Status != StatusSucceeded {
 			t.Fatalf("%q should be accepted as consent (got %q/%q)", consent, res.Status, res.FailureReason)
 		}
+	}
+}
+
+// TestCLIRunnerUnwrapsClaudeJSONEnvelope covers the shape `claude -p
+// --output-format json` actually prints: one envelope object whose "result" field
+// carries the agent's final text. Without unwrapping, configuring a real Claude Code
+// harness would be impossible.
+func TestCLIRunnerUnwrapsClaudeJSONEnvelope(t *testing.T) {
+	r, _ := fakeRunner(t, "claudelike")
+	res, err := r.Run(context.Background(), sampleRequest())
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if res.Status != StatusSucceeded || res.Draft == nil {
+		t.Fatalf("status=%q reason=%q draft=%v", res.Status, res.FailureReason, res.Draft)
+	}
+	if len(res.Draft.Operations) != 1 {
+		t.Fatalf("operations=%d", len(res.Draft.Operations))
+	}
+	op := res.Draft.Operations[0]
+	if op.Integration != "mail" || op.TargetID != "mail-1" || op.ExpectedVersion != 3 {
+		t.Fatalf("unexpected operation: %+v", op)
+	}
+	if op.BusinessKey == "" || strings.Contains(op.BusinessKey, "run-abc") {
+		t.Fatalf("business key must identify the real operation: %q", op.BusinessKey)
+	}
+}
+
+// TestCLIRunnerUnwrapsCodexJSONLStream covers the shape `codex exec --json` prints: a
+// stream of events, the last carrying the final message. The stream must be scanned,
+// not rejected for having more than one line.
+func TestCLIRunnerUnwrapsCodexJSONLStream(t *testing.T) {
+	r, _ := fakeRunner(t, "codexlike")
+	res, err := r.Run(context.Background(), sampleRequest())
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if res.Status != StatusSucceeded || res.Draft == nil {
+		t.Fatalf("status=%q reason=%q draft=%v", res.Status, res.FailureReason, res.Draft)
+	}
+	if op := res.Draft.Operations[0]; op.Integration != "mail" {
+		t.Fatalf("unexpected operation: %+v", op)
+	}
+}
+
+// TestCLIRunnerTreatsErrorEnvelopeAsFailure: a harness that exits 0 but reports its
+// own failure must not be mined for a draft, and its diagnostics must not leak.
+func TestCLIRunnerTreatsErrorEnvelopeAsFailure(t *testing.T) {
+	r, _ := fakeRunner(t, "claudeerror")
+	res, err := r.Run(context.Background(), sampleRequest())
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if res.Status != StatusFailed {
+		t.Fatalf("status=%q, want failed", res.Status)
+	}
+	if res.FailureReason != FailHarnessReportedError {
+		t.Fatalf("reason=%q, want %s", res.FailureReason, FailHarnessReportedError)
+	}
+	if res.Draft != nil {
+		t.Fatal("a reported failure must not yield a draft")
+	}
+	for _, leak := range []string{"authentication", "provider", "session-abc"} {
+		if strings.Contains(strings.ToLower(res.FailureReason), leak) {
+			t.Fatalf("failure_reason leaked harness diagnostics: %q", res.FailureReason)
+		}
+	}
+}
+
+// TestExtractProtocolShapes pins the parser directly, including the bounded-depth
+// guarantee so a hostile envelope cannot recurse without limit.
+func TestExtractProtocolShapes(t *testing.T) {
+	direct := `{"status":"failed","failure_reason":"no_suitable_record"}`
+	if r, err := extractProtocol([]byte(direct)); err != nil || r.FailureReason != "no_suitable_record" {
+		t.Fatalf("direct: %v %+v", err, r)
+	}
+	nested := `{"type":"result","result":"{\"status\":\"waiting\",\"gate\":{\"prompt\":\"q\"}}"}`
+	if r, err := extractProtocol([]byte(nested)); err != nil || r.Status != StatusWaiting {
+		t.Fatalf("nested string: %v %+v", err, r)
+	}
+	objField := `{"output":{"status":"failed","failure_reason":"x"}}`
+	if r, err := extractProtocol([]byte(objField)); err != nil || r.FailureReason != "x" {
+		t.Fatalf("object field: %v %+v", err, r)
+	}
+	multi := "{\"type\":\"progress\"}\n" + `{"status":"failed","failure_reason":"last"}`
+	if r, err := extractProtocol([]byte(multi)); err != nil || r.FailureReason != "last" {
+		t.Fatalf("jsonl last-wins: %v %+v", err, r)
+	}
+	for _, bad := range []string{"", "   ", "not json", `{"unrelated":true}`} {
+		if _, err := extractProtocol([]byte(bad)); err == nil {
+			t.Fatalf("%q must not yield a protocol document", bad)
+		}
+	}
+	// Deep nesting must terminate rather than recurse forever.
+	deep := `{"status":"failed","failure_reason":"x"}`
+	for i := 0; i < 8; i++ {
+		deep = `{"result":` + strconv.Quote(deep) + `}`
+	}
+	if _, err := extractProtocol([]byte(deep)); err != nil {
+		// Not finding it is acceptable; hanging or panicking is not.
+		t.Logf("deep nesting resolved as no-protocol: %v", err)
 	}
 }

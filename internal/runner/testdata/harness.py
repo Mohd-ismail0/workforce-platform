@@ -2,20 +2,27 @@
 """Test-double harness for the CLI runner's conformance tests.
 
 This is a REAL subprocess: the runner launches it, writes the run context to its
-stdin, and validates its stdout through the same proposal path any harness uses.
-It needs no model credential, so the execution boundary (isolation, timeout,
-output caps, failure mapping) can be verified without pretending an AI ran.
+stdin, and validates its stdout through the same path any harness's output takes.
+It needs no model credential, so the execution boundary, the envelope handling and
+the pause/resume loop can all be verified without pretending an AI ran.
 
 Mode comes from HARNESS_MODE:
-  success    emit a valid draft with a business-fact key
-  waiting    emit a gate asking for input
-  runscoped  emit a draft whose business_key embeds the run id (must be rejected)
-  garbage    emit non-JSON
-  slow       sleep well past any configured timeout
-  overflow   emit ~2MB (must trip the output cap and be killed)
-  nonzero    write to stderr and exit non-zero
-  envdump    write the child environment to $HARNESS_ENV_OUT, then succeed
-  stdin      write the received stdin to $HARNESS_STDIN_OUT, then succeed
+  success     emit our protocol directly: a valid draft with a business-fact key
+  waiting     emit our protocol directly: a gate asking for input
+  auto        wait for input, then succeed with the answer applied
+  runscoped   draft whose business_key embeds the run id (must be rejected)
+  garbage     non-JSON
+  slow        sleep well past any configured timeout
+  overflow    ~2MB (must trip the output cap and be killed)
+  nonzero     write to stderr and exit non-zero
+  envdump     record the child environment to $HARNESS_ENV_OUT, then succeed
+  stdin       record the received stdin to $HARNESS_STDIN_OUT, then succeed
+
+Envelope modes mirror what real harnesses actually emit, so the adapter's
+unwrapping is exercised for real rather than assumed:
+  claudelike  one JSON object: {"type":"result",...,"result":"<protocol as text>"}
+  claudeerror one JSON object with "is_error": true
+  codexlike   JSONL events, the last carrying "result"
 """
 import json
 import os
@@ -60,28 +67,6 @@ if MODE == "stdin":
         with open(path, "w", encoding="utf-8") as fh:
             fh.write(raw)
 
-run_id = req.get("run_id", "run")
-records = req.get("records") or []
-mail = next((r for r in records if r.get("integration") == "mail"), None)
-
-if MODE == "waiting":
-    print(json.dumps({
-        "status": "waiting",
-        "summary": "Need supplier details",
-        "gate": {
-            "kind": "missing_information",
-            "prompt": "Which supplier and quantity?",
-            "input_schema": {
-                "properties": {
-                    "supplier_email": {"type": "string"},
-                    "quantity": {"type": "integer"},
-                },
-                "required": ["supplier_email", "quantity"],
-            },
-        },
-    }))
-    sys.exit(0)
-
 GATE = {
     "kind": "missing_information",
     "prompt": "Which supplier, and what quantity should this follow-up cover?",
@@ -94,28 +79,36 @@ GATE = {
     },
 }
 
-if MODE == "auto":
-    # Pause until the human supplies what is missing, then use their answer.
-    # `or []` as well as a default: a key present with a null value still yields None.
-    supplied = {i.get("name"): i.get("value") for i in (req.get("inputs") or []) if i.get("value")}
-    if not supplied.get("supplier_email") or not supplied.get("quantity"):
-        print(json.dumps({"status": "waiting", "summary": "Need supplier details", "gate": GATE}))
-        sys.exit(0)
-    email = json.loads(supplied["supplier_email"])
-    qty = int(json.loads(supplied["quantity"]))
-    if mail is None:
-        print(json.dumps({"status": "failed", "failure_reason": "no_suitable_record"}))
-        sys.exit(0)
-    print(json.dumps({
+run_id = req.get("run_id", "run")
+records = req.get("records") or []
+mail = next((r for r in records if r.get("integration") == "mail"), None)
+supplied = {i.get("name"): i.get("value") for i in (req.get("inputs") or []) if i.get("value")}
+
+
+def waiting_doc():
+    return {"status": "waiting", "summary": "Need supplier details", "gate": GATE}
+
+
+def success_doc():
+    # Mode-agnostic: modes that are not about the gate at all (success, runscoped,
+    # envdump, stdin, and the envelope shapes) still need usable values, so default
+    # rather than assuming a human supplied them.
+    raw_email = supplied.get("supplier_email") or '"ops@supplier.test"'
+    raw_qty = supplied.get("quantity") or "42"
+    email = json.loads(raw_email)
+    qty = int(json.loads(raw_qty))
+    # A BUSINESS-FACT key: identifies the real enquiry, not this run. Two independent
+    # runs proposing the same follow-up must collide, or duplicate detection is defeated.
+    key = "supplier-followup:" + email
+    if MODE == "runscoped":
+        key = "run:%s:%s" % (run_id, mail["id"])
+    return {
         "status": "succeeded",
         "summary": "Prepared supplier follow-up for %s" % email,
         "operations": [{
             "integration": "mail",
             "action": "send",
-            # A BUSINESS-FACT key: identifies the real enquiry, not this run. Two
-            # independent runs proposing the same follow-up must collide, or
-            # duplicate detection is defeated.
-            "business_key": "supplier-followup:" + email,
+            "business_key": key,
             "target_id": mail["id"],
             "expected_version": mail.get("version", 1),
             "payload": {
@@ -126,33 +119,49 @@ if MODE == "auto":
                 "attachments": [],
             },
         }],
-    }))
+    }
+
+
+def protocol_doc():
+    """The protocol document this harness would emit, per mode."""
+    if MODE == "waiting":
+        return waiting_doc()
+    if MODE == "auto" and (not supplied.get("supplier_email") or not supplied.get("quantity")):
+        return waiting_doc()
+    if MODE in ("success", "runscoped", "auto", "claudelike", "codexlike") and mail is None:
+        return {"status": "failed", "failure_reason": "no_suitable_record"}
+    return success_doc()
+
+
+def emit(obj):
+    json.dump(obj, sys.stdout)
+    sys.stdout.write("\n")
+
+
+# --- envelope modes: what real harnesses actually print ---
+if MODE == "claudelike":
+    # Claude Code --output-format json: one object whose "result" carries the text.
+    emit({
+        "type": "result", "subtype": "success", "is_error": False,
+        "session_id": "session-abc", "total_cost_usd": 0.01, "num_turns": 3,
+        "result": json.dumps(protocol_doc()),
+    })
     sys.exit(0)
 
-if mail is None:
-    print(json.dumps({"status": "failed", "failure_reason": "no_suitable_record"}))
+if MODE == "claudeerror":
+    emit({
+        "type": "result", "subtype": "error_during_execution", "is_error": True,
+        "session_id": "session-abc",
+        "result": "authentication failed: internal provider detail that must not surface",
+    })
     sys.exit(0)
 
-# A business-fact key, deliberately NOT derived from the run id.
-key = "supplier-followup:ACME-2026-0042"
-if MODE == "runscoped":
-    key = "run:%s:%s" % (run_id, mail["id"])
+if MODE == "codexlike":
+    # Codex exec --json: a stream of events, the last carrying the final message.
+    emit({"type": "session.started", "session_id": "s-1"})
+    emit({"type": "agent.message", "text": "working"})
+    emit({"type": "task.completed", "result": json.dumps(protocol_doc())})
+    sys.exit(0)
 
-print(json.dumps({
-    "status": "succeeded",
-    "summary": "Prepared supplier follow-up",
-    "operations": [{
-        "integration": "mail",
-        "action": "send",
-        "business_key": key,
-        "target_id": mail["id"],
-        "expected_version": mail.get("version", 1),
-        "payload": {
-            "recipients": ["ops@supplier.test"],
-            "subject": "Stock adjustment request",
-            "body": "Requesting a stock adjustment.",
-            "bcc": [],
-            "attachments": [],
-        },
-    }],
-}))
+# --- plain protocol modes ---
+emit(protocol_doc())
