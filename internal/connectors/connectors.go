@@ -29,12 +29,25 @@ type Record struct {
 	Version int            `json:"version"`
 	Data    map[string]any `json:"data"`
 }
+
+// Field describes one accepted payload field, so the operation contract can be
+// derived from the connector instead of maintained as prose that drifts.
+type Field struct {
+	Name     string `json:"name"`
+	Type     string `json:"type"`
+	Required bool   `json:"required"`
+	Note     string `json:"note,omitempty"`
+}
+
 type Manifest struct {
 	ID         string   `json:"id"`
 	Name       string   `json:"name"`
 	Kind       string   `json:"kind"`
 	Actions    []string `json:"actions"`
 	Simulation bool     `json:"simulation"`
+	// Fields is the payload schema for this integration's operations. Harness
+	// instruction text is generated from it.
+	Fields []Field `json:"fields,omitempty"`
 }
 type Connector interface {
 	Manifest() Manifest
@@ -156,7 +169,12 @@ func integer(v any) (int64, bool) {
 type inventoryConnector struct{}
 
 func (inventoryConnector) Manifest() Manifest {
-	return Manifest{"inventory", "Inventory simulator", "simulator", []string{"adjust"}, true}
+	return Manifest{
+		ID: "inventory", Name: "Inventory simulator", Kind: "simulator",
+		Actions: []string{"adjust"}, Simulation: true,
+		Fields: []Field{{Name: "delta", Type: "integer", Required: true,
+			Note: "signed change applied to the record's quantity"}},
+	}
 }
 func (inventoryConnector) Validate(op Operation) error {
 	return check(inventoryConnector{}.Manifest(), op)
@@ -185,7 +203,17 @@ func (inventoryConnector) Prepare(cur Record, op Operation) (Record, error) {
 type mailConnector struct{}
 
 func (mailConnector) Manifest() Manifest {
-	return Manifest{"mail", "Mail simulator", "simulator", []string{"send"}, true}
+	return Manifest{
+		ID: "mail", Name: "Mail simulator", Kind: "simulator",
+		Actions: []string{"send"}, Simulation: true,
+		Fields: []Field{
+			{Name: "recipients", Type: "array of string", Required: true, Note: "at least one address"},
+			{Name: "subject", Type: "string", Required: true},
+			{Name: "body", Type: "string", Required: true},
+			{Name: "bcc", Type: "array of string", Required: false, Note: "use [] when empty"},
+			{Name: "attachments", Type: "array of string", Required: false, Note: "use [] when empty"},
+		},
+	}
 }
 func (mailConnector) Validate(op Operation) error { return check(mailConnector{}.Manifest(), op) }
 func (mailConnector) Prepare(cur Record, op Operation) (Record, error) {
@@ -200,14 +228,17 @@ func (mailConnector) Prepare(cur Record, op Operation) (Record, error) {
 		if e := parse(op.Payload, &p, map[string]bool{"recipients": true, "subject": true, "body": true, "bcc": true, "attachments": true}); e != nil {
 			return e
 		}
-		if len(p.Recipients) == 0 || p.Subject == "" || p.Body == "" || p.BCC == nil || p.Attachments == nil {
+		if len(p.Recipients) == 0 || p.Subject == "" || p.Body == "" {
 			return ErrInvalid
 		}
-		d["recipients"] = append([]string(nil), p.Recipients...)
+		// An ABSENT optional collection means "empty", not "invalid": a model that
+		// omits bcc is saying there is none, and rejecting the whole operation for
+		// that was brittle. Unknown fields are still rejected, so nothing is smuggled.
+		d["recipients"] = append([]string{}, p.Recipients...)
 		d["subject"] = p.Subject
 		d["body"] = p.Body
-		d["bcc"] = append([]string(nil), p.BCC...)
-		d["attachments"] = append([]string(nil), p.Attachments...)
+		d["bcc"] = append([]string{}, p.BCC...)
+		d["attachments"] = append([]string{}, p.Attachments...)
 		return nil
 	})
 }
@@ -215,7 +246,14 @@ func (mailConnector) Prepare(cur Record, op Operation) (Record, error) {
 type documentConnector struct{}
 
 func (documentConnector) Manifest() Manifest {
-	return Manifest{"documents", "Documents simulator", "simulator", []string{"update"}, true}
+	return Manifest{
+		ID: "documents", Name: "Documents simulator", Kind: "simulator",
+		Actions: []string{"update"}, Simulation: true,
+		Fields: []Field{
+			{Name: "title", Type: "string", Required: false, Note: "supply title and/or content"},
+			{Name: "content", Type: "string", Required: false, Note: "supply title and/or content"},
+		},
+	}
 }
 func (documentConnector) Validate(op Operation) error {
 	return check(documentConnector{}.Manifest(), op)
