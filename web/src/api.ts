@@ -79,6 +79,45 @@ export type HandoffOffer = {
   created_at: string;
 };
 
+export type GateKind = "clarification" | "selection" | "missing_information";
+export type GateProperty = {
+  type: "string" | "integer" | "number" | "boolean";
+};
+export type Gate = {
+  id: string;
+  org_id: string;
+  task_id: string;
+  run_id: string;
+  kind: GateKind;
+  prompt: string;
+  input_schema: {
+    properties?: Record<string, GateProperty>;
+    required?: string[];
+    [key: string]: unknown;
+  };
+  revision: number;
+  status: string;
+  respondent_id: string;
+  response?: Record<string, unknown> | null;
+  responded_by?: string | null;
+  responded_at?: string | null;
+  expires_at?: string | null;
+  created_by: string;
+  created_at: string;
+  version: number;
+};
+
+export const listGates = () => list<Gate>("/gates");
+export const getGate = (id: string) => api<Gate>(`/gates/${id}`);
+export const respondToGate = (
+  id: string,
+  body: { revision: number; response: Record<string, unknown> },
+) =>
+  api<Gate>(`/gates/${id}/respond`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+
 export type AgentRun = {
   id: string;
   org_id: string;
@@ -88,7 +127,7 @@ export type AgentRun = {
   harness_release_id: string;
   runner_id: string;
   intent: string;
-  status: "queued" | "running" | "succeeded" | "failed" | "cancelled";
+  status: "queued" | "running" | "waiting" | "succeeded" | "failed" | "cancelled";
   proposal_id?: string | null;
   result_summary?: string | null;
   failure_reason?: string | null;
@@ -128,10 +167,13 @@ export async function api<T>(path: string, init: RequestInit = {}) {
     },
   });
   const body = await response.json().catch(() => null);
-  if (!response.ok)
-    throw new Error(
+  if (!response.ok) {
+    const error = new Error(
       body?.error?.message || `Request failed (${response.status})`,
-    );
+    ) as Error & { status?: number };
+    error.status = response.status;
+    throw error;
+  }
   return body as T;
 }
 export const list = async <T>(path: string) =>

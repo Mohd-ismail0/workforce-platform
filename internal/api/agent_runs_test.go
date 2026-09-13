@@ -52,7 +52,7 @@ func activeHarnessRelease(t *testing.T, f *apiFixture, tok string) map[string]an
 	code, rel := f.do(tok, "POST", "/api/v1/registry/releases", map[string]any{
 		"family": "harness-fam-" + u[:8], "kind": "harness", "version": "1.0.0-" + u[8:16],
 		"digest": "sha256:" + u, "requested_capabilities": []string{"prepare_proposal"},
-		"simulation": true, "compatibility_range": ">=1",
+		"simulation": true, "manifest": map[string]any{"runner_id": "simulator"}, "compatibility_range": ">=1",
 	})
 	if code != 201 {
 		t.Fatalf("create harness release: %d %v", code, rel)

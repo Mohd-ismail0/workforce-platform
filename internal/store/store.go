@@ -292,7 +292,15 @@ func (s *Store) CancelTask(ctx context.Context, org, id string, version int64) e
 		if r.RowsAffected() != 1 {
 			return errors.New("stale task version or task cannot be cancelled")
 		}
-		_, e = tx.Exec(ctx, "update proposals set status='rejected' where org_id=$1 and task_id=$2 and status in ('pending_endorsement','pending_approval','approved','executing')", org, id)
+		if _, e = tx.Exec(ctx, "update proposals set status='rejected' where org_id=$1 and task_id=$2 and status in ('pending_endorsement','pending_approval','approved','executing')", org, id); e != nil {
+			return e
+		}
+		// A cancelled task must not leave questions open that nobody can act on,
+		// nor runs parked forever waiting for answers to them.
+		if _, e = tx.Exec(ctx, "update decision_gates set status='cancelled',version=version+1 where org_id=$1 and task_id=$2 and status='pending'", org, id); e != nil {
+			return e
+		}
+		_, e = tx.Exec(ctx, "update agent_runs set status='cancelled',finished_at=clock_timestamp(),claim_token='',claim_expires_at=null where org_id=$1 and task_id=$2 and status in ('queued','running','waiting')", org, id)
 		return e
 	})
 }
@@ -306,66 +314,76 @@ func (s *Store) CreateAgent(ctx context.Context, org, name, harness, owner strin
 	_ = json.Unmarshal(b, &x.Capabilities)
 	return x, e
 }
-func (s *Store) CreateProposal(ctx context.Context, org, task, actor, summary string, ops []connectors.Operation) (Proposal, error) {
+func (s *Store) createProposalTx(ctx context.Context, tx pgx.Tx, org, task, actor, summary, origin, originRunID string, ops []connectors.Operation) (Proposal, error) {
 	var x Proposal
 	var b []byte
 	var t time.Time
-	e := s.WithOrg(ctx, org, func(tx pgx.Tx) error {
-		var taskStatus, owner string
-		if e := tx.QueryRow(ctx, "select status,owner_id from tasks where org_id=$1 and id=$2 for update", org, task).Scan(&taskStatus, &owner); e != nil {
-			return e
+	var taskStatus, owner string
+	if e := tx.QueryRow(ctx, "select status,owner_id from tasks where org_id=$1 and id=$2 for update", org, task).Scan(&taskStatus, &owner); e != nil {
+		return x, e
+	}
+	if owner != actor {
+		return x, errors.New("only task owner may create proposal")
+	}
+	if taskStatus == "done" || taskStatus == "cancelled" {
+		return x, errors.New("terminal task")
+	}
+	reg := connectors.NewRegistry()
+	var rev int64
+	if e := tx.QueryRow(ctx, "select coalesce(max(revision),0)+1 from proposals where org_id=$1 and task_id=$2", org, task).Scan(&rev); e != nil {
+		return x, e
+	}
+	for i := range ops {
+		if ops[i].ID == "" {
+			ops[i].ID = platform.NewID()
 		}
-		if owner != actor {
-			return errors.New("only task owner may create proposal")
+		if ops[i].Integration == "" || ops[i].Action == "" || ops[i].TargetID == "" || ops[i].ExpectedVersion < 1 {
+			return x, errors.New("invalid operation")
 		}
-		if taskStatus == "done" || taskStatus == "cancelled" {
-			return errors.New("terminal task")
+		c, ok := reg.Get(ops[i].Integration)
+		if !ok || c.Validate(ops[i]) != nil {
+			return x, errors.New("invalid operation")
 		}
-		reg := connectors.NewRegistry()
-		var rev int64
-		if e := tx.QueryRow(ctx, "select coalesce(max(revision),0)+1 from proposals where org_id=$1 and task_id=$2", org, task).Scan(&rev); e != nil {
-			return e
+		var ver int64
+		var rb []byte
+		if e := tx.QueryRow(ctx, "select version,data from simulator_records where org_id=$1 and id=$2", org, ops[i].TargetID).Scan(&ver, &rb); e != nil {
+			return x, e
 		}
-		for i := range ops {
-			if ops[i].ID == "" {
-				ops[i].ID = platform.NewID()
-			}
-			if ops[i].Integration == "" || ops[i].Action == "" || ops[i].TargetID == "" || ops[i].ExpectedVersion < 1 {
-				return errors.New("invalid operation")
-			}
-			c, ok := reg.Get(ops[i].Integration)
-			if !ok || c.Validate(ops[i]) != nil {
-				return errors.New("invalid operation")
-			}
-			var ver int64
-			var rb []byte
-			if e := tx.QueryRow(ctx, "select version,data from simulator_records where org_id=$1 and id=$2", org, ops[i].TargetID).Scan(&ver, &rb); e != nil {
-				return e
-			}
-			if int64(ops[i].ExpectedVersion) != ver {
-				return errors.New("stale record")
-			}
-			var data map[string]any
-			if json.Unmarshal(rb, &data) != nil {
-				return errors.New("invalid record")
-			}
-			if _, e := c.Prepare(connectors.Record{ID: ops[i].TargetID, Version: int(ver), Data: data}, ops[i]); e != nil {
-				return e
-			}
+		if int64(ops[i].ExpectedVersion) != ver {
+			return x, errors.New("stale record")
 		}
-		if _, e := tx.Exec(ctx, "update proposals set status='superseded' where org_id=$1 and task_id=$2 and status in ('pending_endorsement','pending_approval','approved')", org, task); e != nil {
-			return e
+		var data map[string]any
+		if json.Unmarshal(rb, &data) != nil {
+			return x, errors.New("invalid record")
 		}
-		b, _ = json.Marshal(ops)
-		id := platform.NewID()
-		d := digest(ops)
-		if e := tx.QueryRow(ctx, "insert into proposals(id,org_id,task_id,revision,digest,status,summary,operations,created_by) values($1,$2,$3,$4,$5,'pending_endorsement',$6,$7,$8) returning id,org_id,task_id,revision,digest,status,summary,operations,created_at", id, org, task, rev, d, summary, b, actor).Scan(&x.ID, &x.OrgID, &x.TaskID, &x.Revision, &x.Digest, &x.Status, &x.Summary, &b, &t); e != nil {
-			return e
+		if _, e := c.Prepare(connectors.Record{ID: ops[i].TargetID, Version: int(ver), Data: data}, ops[i]); e != nil {
+			return x, e
 		}
-		return reserveBusinessOperations(ctx, tx, org, id, ops)
-	})
+	}
+	if _, e := tx.Exec(ctx, "update proposals set status='superseded' where org_id=$1 and task_id=$2 and status in ('pending_endorsement','pending_approval','approved')", org, task); e != nil {
+		return x, e
+	}
+	b, _ = json.Marshal(ops)
+	pid := platform.NewID()
+	d := digest(ops)
+	if e := tx.QueryRow(ctx, "insert into proposals(id,org_id,task_id,revision,digest,status,summary,operations,created_by,origin,origin_run_id) values($1,$2,$3,$4,$5,'pending_endorsement',$6,$7,$8,$9,$10) returning id,org_id,task_id,revision,digest,status,summary,operations,created_at", pid, org, task, rev, d, summary, b, actor, origin, originRunID).Scan(&x.ID, &x.OrgID, &x.TaskID, &x.Revision, &x.Digest, &x.Status, &x.Summary, &b, &t); e != nil {
+		return x, e
+	}
+	if e := reserveBusinessOperations(ctx, tx, org, pid, ops); e != nil {
+		return x, e
+	}
 	_ = json.Unmarshal(b, &x.Operations)
 	x.CreatedAt = scanTime(&t)
+	return x, nil
+}
+
+func (s *Store) CreateProposal(ctx context.Context, org, task, actor, summary string, ops []connectors.Operation) (Proposal, error) {
+	var x Proposal
+	e := s.WithOrg(ctx, org, func(tx pgx.Tx) error {
+		var err error
+		x, err = s.createProposalTx(ctx, tx, org, task, actor, summary, "human", "", ops)
+		return err
+	})
 	return x, e
 }
 func (s *Store) ListProposals(ctx context.Context, org string) ([]Proposal, error) {

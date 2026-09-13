@@ -138,7 +138,10 @@ if code == 409:
     code, hrel = call(admin_tok, "POST", "/registry/releases", {
         "family": "harness-live-" + stamp, "kind": "harness", "version": "1.0.0-" + stamp,
         "digest": "sha256:live-" + stamp, "requested_capabilities": ["prepare_proposal"],
-        "simulation": True, "compatibility_range": ">=1"})
+        "simulation": True, "compatibility_range": ">=1",
+        # A harness release only binds to a runner it names. Without this the
+        # release can never satisfy an agent whose harness is "simulator".
+        "manifest": {"runner_id": "simulator"}})
     expect("harness release registered", code, 201)
     for step in ("verified", "approved", "installed", "active"):
         code, hrel = call(admin_tok, "POST", f"/registry/releases/{hrel['id']}/transition",
@@ -164,6 +167,51 @@ if finished["proposal_id"]:
 code, _ = call(other, "GET", f"/runs/{first['id']}")
 expect("cross-org run read denied", code, 404)
 
+
+
+# 6. Pause, resume, and the promise that other work keeps moving.
+_, pause_agent = call(requester, "POST", "/agents", {"name": "Live Pause Agent", "harness": "simulator"}, expect=201)
+_, pause_task = call(requester, "POST", "/tasks", {"title": "live pause resume"}, expect=201)
+_, mails = call(requester, "GET", "/integrations/mail/records", expect=200)
+expect("a mail destination exists for the resumed work", len(mails["items"]) > 0, True)
+
+code, prun = call(requester, "POST", f"/tasks/{pause_task['id']}/runs",
+                  {"agent_id": pause_agent["id"], "intent": "clarify the supplier quantity"}, expect=201)
+
+parked = {}
+for _ in range(40):
+    _, parked = call(requester, "GET", f"/runs/{prun['id']}", expect=200)
+    if parked["status"] in ("waiting", "failed"):
+        break
+    time.sleep(0.5)
+expect("run parks when it needs human input", parked["status"], "waiting")
+expect("a parked run is not a failure", parked["failure_reason"], "")
+expect("a parked run publishes nothing", parked["proposal_id"], "")
+
+_, gates = call(requester, "GET", "/gates", expect=200)
+gate = next((g for g in gates["items"] if g["run_id"] == prun["id"]), None)
+expect("the question is visible to its respondent", gate is not None, True)
+if gate:
+    good = {"supplier_email": "ops@supplier.test", "quantity": 42}
+    code, _ = call(approver, "POST", f"/gates/{gate['id']}/respond",
+                   {"revision": gate["revision"], "response": good})
+    expect("a non-respondent cannot answer", code, 403)
+    code, _ = call(requester, "POST", f"/gates/{gate['id']}/respond",
+                   {"revision": gate["revision"], "response": {"supplier_email": "ops@supplier.test"}})
+    expect("a malformed answer is refused", code, 422)
+    call(requester, "POST", f"/gates/{gate['id']}/respond",
+         {"revision": gate["revision"], "response": good}, expect=200)
+
+    resumed = {}
+    for _ in range(60):
+        _, resumed = call(requester, "GET", f"/runs/{prun['id']}", expect=200)
+        if resumed["status"] in ("succeeded", "failed"):
+            break
+        time.sleep(0.5)
+    expect("the answered run resumes to success", resumed["status"], "succeeded")
+    if resumed["proposal_id"]:
+        _, rp2 = call(requester, "GET", f"/proposals/{resumed['proposal_id']}", expect=200)
+        expect("resumed output still needs a human", rp2["status"], "pending_endorsement")
 
 width = max(len(n) for n, _, _ in checks)
 for name, got, want in checks:

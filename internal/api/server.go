@@ -202,6 +202,38 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		parts := strings.Split(path, "/")
 		x, e := s.store.ListRecords(ctx, id.OrgID, parts[2])
 		respond(w, x, e)
+	case path == "/gates" && r.Method == "GET":
+		x, e := s.store.ListGates(ctx, id.OrgID, id.ID)
+		respond(w, x, e)
+	case strings.HasPrefix(path, "/gates/") && strings.HasSuffix(path, "/respond") && r.Method == "POST":
+		parts := strings.Split(strings.Trim(path, "/"), "/")
+		var q struct {
+			Revision int64           `json:"revision"`
+			Response json.RawMessage `json:"response"`
+		}
+		if decode(r, &q) != nil {
+			failCode(w, 422, "invalid_request", "revision and response are required")
+			return
+		}
+		x, e := s.store.ResolveGate(ctx, id.OrgID, parts[1], id.ID, q.Revision, q.Response)
+		if e == nil {
+			jsonWrite(w, 200, x)
+		} else if errors.Is(e, store.ErrGateNotFound) {
+			failCode(w, 404, "not_found", "gate not found")
+		} else if errors.Is(e, store.ErrGateNotRespondent) {
+			failCode(w, 403, "forbidden", "not the gate respondent")
+		} else if errors.Is(e, store.ErrGateInvalidResponse) {
+			failCode(w, 422, "invalid_response", "response does not match the requested input")
+		} else {
+			failCode(w, 409, "conflict", "gate has changed")
+		}
+	case strings.HasPrefix(path, "/gates/") && r.Method == "GET":
+		x, e := s.store.ReadGate(ctx, id.OrgID, strings.TrimPrefix(path, "/gates/"), id.ID)
+		if e == nil {
+			jsonWrite(w, 200, x)
+		} else {
+			failCode(w, 404, "not_found", "gate not found")
+		}
 	case path == "/runs" && r.Method == "GET":
 		x, e := s.store.ListAgentRuns(ctx, id.OrgID)
 		respond(w, x, e)
@@ -257,6 +289,8 @@ func (s *Server) routeResource(w http.ResponseWriter, r *http.Request, id platfo
 			x, e := s.store.CreateAgentRun(ctx, id.OrgID, tid, id.ID, q.AgentID, q.Intent)
 			if e == nil {
 				jsonWrite(w, 201, x)
+			} else if errors.As(e, &store.ErrHarnessUnsupported{}) {
+				failCode(w, 409, "harness_unsupported", "the configured harness is unsupported by this binary")
 			} else if errors.As(e, &store.ErrNoActiveHarness{}) {
 				failCode(w, 409, "no_active_harness", "an active harness release is required in the registry")
 			} else {

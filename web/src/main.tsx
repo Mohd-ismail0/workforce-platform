@@ -9,6 +9,9 @@ import {
   list,
   listHandoffs,
   listRegistryReleases,
+  listGates,
+  respondToGate,
+  Gate,
   listRuns,
   startRun,
   createRegistryRelease,
@@ -31,6 +34,7 @@ const nav = [
   "Agents",
   "Activity & receipts",
   "Handoffs",
+  "Needs input",
   "Runs",
   "Registry",
 ];
@@ -229,6 +233,16 @@ function Shell({
   setError: (v: string) => void;
   logout: () => void;
 }) {
+  const [gateCount, setGateCount] = useState(0);
+  const refreshGateCount = () =>
+    listGates()
+      .then((gates) => setGateCount(gates.length))
+      .catch(() => undefined);
+  useEffect(() => {
+    refreshGateCount();
+    window.addEventListener("gates-updated", refreshGateCount);
+    return () => window.removeEventListener("gates-updated", refreshGateCount);
+  }, []);
   return (
     <div className="app">
       <aside>
@@ -248,9 +262,12 @@ function Shell({
               onClick={() => setPage(n)}
             >
               <span className="nav-icon">
-                {["⌂", "▦", "✓", "◈", "◎", "≋", "⇄", "▶", "◇"][i]}
+                {["⌂", "▦", "✓", "◈", "◎", "≋", "⇄", "?", "▶", "◇"][i]}
               </span>
               {n}
+              {n === "Needs input" && gateCount > 0 && (
+                <span className="count">{gateCount}</span>
+              )}
             </button>
           ))}
         </nav>
@@ -299,10 +316,113 @@ function Page({
   if (page === "Agents") return <Agents setError={setError} />;
   if (page === "Activity & receipts") return <Activity setError={setError} />;
   if (page === "Handoffs") return <Handoffs me={me} setError={setError} />;
+  if (page === "Needs input") return <Gates setError={setError} />;
   if (page === "Runs") return <Runs setError={setError} />;
   if (page === "Registry") return <Registry me={me} setError={setError} />;
   return <Overview me={me} setError={setError} />;
 }
+export function Gates({ setError }: { setError: (v: string) => void }) {
+  const [items, setItems] = useState<Gate[]>([]);
+  const [loading, setLoading] = useState(true);
+  const load = () => {
+    setLoading(true);
+    listGates()
+      .then((gates) =>
+        setItems(
+          [...gates].sort(
+            (a, b) => Date.parse(b.created_at) - Date.parse(a.created_at),
+          ),
+        ),
+      )
+      .catch((e) => setError(e.message))
+      .finally(() => setLoading(false));
+  };
+  useEffect(load, []);
+  return (
+    <section aria-label="Needs input">
+      <div className="alert">
+        Answering a question resumes the agent. The agent's output is still only
+        a proposal that needs endorsement and approval before anything is
+        executed.
+      </div>
+      <div className="toolbar">
+        <div>
+          <h2>Needs input</h2>
+          <p className="muted">Questions waiting for your response.</p>
+        </div>
+        <button className="button" onClick={load}>Refresh</button>
+      </div>
+      {loading ? <p className="muted">Loading gates…</p> : !items.length ? (
+        <div className="empty-panel"><h3>Nothing is waiting on you</h3></div>
+      ) : (
+        <div className="handoff-list">
+          {items.map((gate) => (
+            <GateCard key={gate.id} gate={gate} load={load} setError={setError} />
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+function GateCard({ gate, load, setError }: { gate: Gate; load: () => void; setError: (v: string) => void }) {
+  const properties = gate.input_schema.properties || {};
+  const required = new Set(gate.input_schema.required || []);
+  const [values, setValues] = useState<Record<string, string | boolean>>({});
+  const [status, setStatus] = useState("");
+  const submit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    const response: Record<string, unknown> = {};
+    for (const [name, schema] of Object.entries(properties)) {
+      const value = values[name];
+      if (required.has(name) && (schema.type === "boolean" ? value === undefined : String(value ?? "").trim() === "")) {
+        setStatus(`${name} is required.`);
+        return;
+      }
+      if (value === undefined || (schema.type === "string" && value === "" && !required.has(name))) continue;
+      if (schema.type === "integer") {
+        const number = Number(value);
+        if (!Number.isInteger(number)) { setStatus(`${name} must be a whole number.`); return; }
+        response[name] = number;
+      } else if (schema.type === "number") response[name] = Number(value);
+      else response[name] = value;
+    }
+    try {
+      const resolved = await respondToGate(gate.id, { revision: gate.revision, response });
+      setStatus(`Answer recorded for agent run ${resolved.run_id}. It is queued to resume — watch Runs.`);
+      window.dispatchEvent(new Event("gates-updated"));
+      load();
+    } catch (error) {
+      const e = error as Error & { status?: number };
+      if (e.status === 409) { setStatus(e.message); load(); }
+      else if (e.status === 422) setStatus(e.message);
+      else if (e.status === 403) setStatus("You are not the respondent for this gate.");
+      else setError(e.message);
+    }
+  };
+  return (
+    <article className="panel handoff-card">
+      <span className="tag">{gate.kind === "missing_information" ? "Missing information" : gate.kind[0].toUpperCase() + gate.kind.slice(1)}</span>
+      <h3>{gate.prompt}</h3>
+      <p className="muted">Task <code>{gate.task_id}</code> · Run <code>{gate.run_id}</code></p>
+      <small className="muted">Created {gate.created_at}</small>
+      <form className="composer" onSubmit={submit} aria-label={`Answer gate ${gate.id}`}>
+        {Object.entries(properties).map(([name, schema]) => (
+          <label key={name}>
+            {name}{required.has(name) ? " *" : ""}
+            {schema.type === "boolean" ? (
+              <input type="checkbox" checked={Boolean(values[name])} onChange={(e) => setValues({ ...values, [name]: e.target.checked })} />
+            ) : (
+              <input type={schema.type === "string" ? "text" : "number"} step={schema.type === "integer" ? 1 : undefined} value={String(values[name] ?? "")} onChange={(e) => setValues({ ...values, [name]: e.target.value })} />
+            )}
+          </label>
+        ))}
+        <button className="primary">Submit answer</button>
+      </form>
+      {status && <p role="status">{status} {status.includes("queued to resume") && <a href="#runs">See Runs</a>}</p>}
+    </article>
+  );
+}
+
 export function Runs({ setError }: { setError: (v: string) => void }) {
   const [items, setItems] = useState<import("./api").AgentRun[]>([]);
   const [loading, setLoading] = useState(true);
@@ -356,7 +476,9 @@ export function Runs({ setError }: { setError: (v: string) => void }) {
                 <strong>{run.harness}</strong>
                 <span className="muted">Runner: {run.runner_id}</span>
               </div>
-              <span className="status-chip">{run.status}</span>
+              <span className="status-chip">
+                {run.status === "waiting" ? "Waiting for input" : run.status}
+              </span>
               <div>
                 <span className="label">INTENT</span>
                 <p>{run.intent}</p>
@@ -365,9 +487,11 @@ export function Runs({ setError }: { setError: (v: string) => void }) {
                 </span>
               </div>
               <div>
-                {run.status === "failed" ||
-                run.status === "cancelled" ||
-                run.failure_reason ? (
+                {run.status === "waiting" ? (
+                  <span>Waiting for input — no worker is held. <a href="#needs-input">Needs input</a></span>
+                ) : run.status === "failed" ||
+                  run.status === "cancelled" ||
+                  run.failure_reason ? (
                   <strong>{run.failure_reason || "Run blocked"}</strong>
                 ) : (
                   run.result_summary || "No result yet"
@@ -706,6 +830,12 @@ export function TaskDetail({
   const [agentId, setAgentId] = useState("");
   const [runIntent, setRunIntent] = useState("");
   const [runStatus, setRunStatus] = useState("");
+  const [waitingGate, setWaitingGate] = useState<Gate>();
+  useEffect(() => {
+    listGates()
+      .then((gates) => setWaitingGate(gates.find((gate) => gate.task_id === task.id)))
+      .catch(() => undefined);
+  }, [task.id]);
   const [values, setValues] = useState<Record<string, string>>({
     delta: "0",
     recipients: "",
@@ -798,6 +928,12 @@ export function TaskDetail({
         <p className="muted">
           Status: {task.status} · Frozen version: {task.version}
         </p>
+        {waitingGate && (
+          <div className="alert">
+            <strong>Waiting for your input:</strong> {waitingGate.prompt}{" "}
+            <a href="#needs-input">Answer on Needs input</a>
+          </div>
+        )}
         <div className="toolbar">
           <button
             className="button"

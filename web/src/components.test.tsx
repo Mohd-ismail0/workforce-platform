@@ -6,7 +6,7 @@ import {
   waitFor,
   cleanup,
 } from "@testing-library/react";
-import { HandoffForms, Login, Registry, Runs, TaskDetail } from "./main";
+import { HandoffForms, Login, Registry, Runs, TaskDetail, Gates } from "./main";
 import { setToken } from "./api";
 import React from "react";
 
@@ -221,13 +221,11 @@ describe("agent runs", () => {
     created_at: "",
   };
   it("posts agent_id and intent and renders returned status", async () => {
-    const fetchMock = vi
-      .spyOn(globalThis, "fetch")
-      .mockResolvedValue(
-        new Response(JSON.stringify({ ...run, status: "running" }), {
-          status: 201,
-        }),
-      );
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) =>
+      String(input).endsWith("/gates")
+        ? new Response(JSON.stringify({ items: [] }), { status: 200 })
+        : new Response(JSON.stringify({ ...run, status: "running" }), { status: 201 }),
+    );
     render(
       <TaskDetail
         task={task}
@@ -250,21 +248,14 @@ describe("agent runs", () => {
           .some((x) => x.textContent?.includes("running")),
       ).toBe(true),
     );
-    expect(fetchMock.mock.calls[0][1]?.body).toBe(
+    expect(
+      fetchMock.mock.calls.find(([, init]) => init?.method === "POST")?.[1]?.body,
+    ).toBe(
       JSON.stringify({ agent_id: "agent-1", intent: "Prepare proposal" }),
     );
   });
   it("renders the backend 409 error verbatim", async () => {
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(
-        JSON.stringify({
-          error: {
-            message: "No active harness release exists in the registry",
-          },
-        }),
-        { status: 409 },
-      ),
-    );
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => String(input).endsWith("/gates") ? new Response(JSON.stringify({ items: [] }), { status: 200 }) : new Response(JSON.stringify({ error: { message: "No active harness release exists in the registry" } }), { status: 409 }));
     render(
       <TaskDetail
         task={task}
@@ -313,6 +304,57 @@ describe("agent runs", () => {
     );
   });
 });
+describe("gates", () => {
+  const gate = {
+    id: "gate-1", org_id: "o", task_id: "task-1", run_id: "run-1",
+    kind: "clarification", prompt: "Which values?", input_schema: {
+      properties: { answer: { type: "string" }, count: { type: "integer" }, ok: { type: "boolean" } },
+      required: ["answer", "count"],
+    }, revision: 3, status: "pending", respondent_id: "p", created_by: "a", created_at: "2026-01-01T00:00:00Z", version: 1,
+  };
+  beforeEach(() => { cleanup(); vi.restoreAllMocks(); });
+  it("renders prompt and schema fields", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ items: [gate] }), { status: 200 }));
+    render(<Gates setError={vi.fn()} />);
+    await waitFor(() => expect(screen.getByText("Which values?")).toBeTruthy());
+    expect(screen.getByLabelText("answer *")).toBeTruthy();
+    expect(screen.getByLabelText("count *")).toBeTruthy();
+    expect(screen.getByLabelText("ok")).toBeTruthy();
+  });
+  it("posts the current revision and serialized response", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => String(input).endsWith("/gates") ? new Response(JSON.stringify({ items: [gate] }), { status: 200 }) : new Response(JSON.stringify({ ...gate, response: { answer: "yes", count: 2, ok: true } }), { status: 200 }));
+    render(<Gates setError={vi.fn()} />);
+    await waitFor(() => screen.getByText("Which values?"));
+    fireEvent.change(screen.getByLabelText("answer *"), { target: { value: "yes" } });
+    fireEvent.change(screen.getByLabelText("count *"), { target: { value: "2" } });
+    fireEvent.click(screen.getByLabelText("ok"));
+    fireEvent.submit(screen.getByRole("form", { name: "Answer gate gate-1" }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([, init]) => String(init?.body) === JSON.stringify({ revision: 3, response: { answer: "yes", count: 2, ok: true } }))).toBe(true));
+  });
+  it("refreshes and shows a 409 message", async () => {
+    let gets = 0;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => { if (String(input).endsWith("/gates")) { gets++; return new Response(JSON.stringify({ items: [gate] }), { status: 200 }); } return new Response(JSON.stringify({ error: { message: "Gate changed elsewhere" } }), { status: 409 }); });
+    render(<Gates setError={vi.fn()} />);
+    await waitFor(() => screen.getByText("Which values?"));
+    fireEvent.change(screen.getByLabelText("answer *"), { target: { value: "yes" } });
+    fireEvent.change(screen.getByLabelText("count *"), { target: { value: "2" } });
+    fireEvent.submit(screen.getByRole("form", { name: "Answer gate gate-1" }));
+    await waitFor(() => expect(screen.getByRole("status").textContent).toContain("Gate changed elsewhere"));
+    expect(gets).toBe(2);
+  });
+  it("rejects non-integer values without posting", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ items: [gate] }), { status: 200 }));
+    render(<Gates setError={vi.fn()} />);
+    await waitFor(() => screen.getByText("Which values?"));
+    fireEvent.change(screen.getByLabelText("answer *"), { target: { value: "yes" } });
+    fireEvent.change(screen.getByLabelText("count *"), { target: { value: "1.5" } });
+    fireEvent.submit(screen.getByRole("form", { name: "Answer gate gate-1" }));
+    expect(screen.getByRole("status").textContent).toContain("whole number");
+    expect(fetchMock.mock.calls.every(([, init]) => !init?.method || init.method !== "POST")).toBe(true);
+  });
+});
+
+
 describe("login", () => {
   it("does not call network while typing", () => {
     const fetchMock = vi.spyOn(globalThis, "fetch");

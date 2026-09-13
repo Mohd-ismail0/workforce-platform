@@ -31,7 +31,9 @@ commands={
  'seed':['go','run','./cmd/workforce','-seed'],
  'api':['go','run','./cmd/workforce'],
  'worker':['go','run','./cmd/workforce','-worker'],
- 'test':['go','test','-race','-count=1','./...'],
+ # -p 1: packages run serially. The api tests start real River workers on the
+ # shared database and queue, so parallel packages would steal each other's jobs.
+ 'test':['go','test','-race','-count=1','-p','1','./...'],
  'build':['go','build','-o','bin/workforce','./cmd/workforce'],
 }
 raise SystemExit(subprocess.call(commands[a.action],cwd=ROOT,env=env))

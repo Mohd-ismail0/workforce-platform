@@ -19,6 +19,7 @@ func harnessRelease(t *testing.T, s *Store, org, actor, role, state string) Regi
 	rel, e := s.CreateRegistryRelease(ctx, org, actor, RegistryCreate{
 		Family: "harness-fam-" + u[:8], Kind: "harness", Version: "1.0.0-" + u[8:16],
 		Digest: "sha256:" + u, RequestedCapabilities: []string{"prepare_proposal"},
+		Manifest:   json.RawMessage(`{"runner_id":"simulator"}`),
 		Simulation: true, CompatibilityRange: ">=1", Provenance: map[string]any{"source": "fixture"},
 	})
 	if e != nil {
