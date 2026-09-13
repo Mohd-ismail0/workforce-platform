@@ -48,7 +48,7 @@ func TestRiverAppliesThreeIntegrationsAndReadback(t *testing.T) {
 			if code != 201 {
 				t.Fatalf("task %d %v", code, task)
 			}
-			code, p := f.do("req", "POST", "/api/v1/tasks/"+id(task)+"/proposals", map[string]any{"summary": "approved simulation", "operations": []map[string]any{{"id": platform.NewID(), "integration": tc.integration, "action": tc.action, "target_id": target, "expected_version": 1, "payload": tc.payload}}})
+			code, p := f.do("req", "POST", "/api/v1/tasks/"+id(task)+"/proposals", map[string]any{"summary": "approved simulation", "operations": []map[string]any{{"id": platform.NewID(), "integration": tc.integration, "action": tc.action, "business_key": platform.NewID(), "target_id": target, "expected_version": 1, "payload": tc.payload}}})
 			if code != 201 {
 				t.Fatalf("proposal %d %v", code, p)
 			}

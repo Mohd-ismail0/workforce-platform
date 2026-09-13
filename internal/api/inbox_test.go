@@ -1,6 +1,10 @@
 package api
 
-import "testing"
+import (
+	"testing"
+
+	"workforce.local/platform/internal/platform"
+)
 
 func TestPendingDecisionInboxAndAgentRegistry(t *testing.T) {
 	f := newFixture(t)
@@ -24,7 +28,7 @@ func TestPendingDecisionInboxAndAgentRegistry(t *testing.T) {
 	_, task := f.do("req", "POST", "/api/v1/tasks", map[string]any{"title": "decision inbox"})
 	_, records := f.do("req", "GET", "/api/v1/integrations/documents/records", nil)
 	rec := records["items"].([]any)[0].(map[string]any)
-	code, p := f.do("req", "POST", "/api/v1/tasks/"+id(task)+"/proposals", map[string]any{"summary": "document review", "operations": []map[string]any{{"integration": "documents", "action": "update", "target_id": rec["id"], "expected_version": rec["version"], "payload": map[string]any{"title": "Reviewed"}}}})
+	code, p := f.do("req", "POST", "/api/v1/tasks/"+id(task)+"/proposals", map[string]any{"summary": "document review", "operations": []map[string]any{{"integration": "documents", "action": "update", "business_key": platform.NewID(), "target_id": rec["id"], "expected_version": rec["version"], "payload": map[string]any{"title": "Reviewed"}}}})
 	if code != 201 {
 		t.Fatalf("proposal %d %v", code, p)
 	}

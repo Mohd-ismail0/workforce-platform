@@ -359,7 +359,10 @@ func (s *Store) CreateProposal(ctx context.Context, org, task, actor, summary st
 		b, _ = json.Marshal(ops)
 		id := platform.NewID()
 		d := digest(ops)
-		return tx.QueryRow(ctx, "insert into proposals(id,org_id,task_id,revision,digest,status,summary,operations,created_by) values($1,$2,$3,$4,$5,'pending_endorsement',$6,$7,$8) returning id,org_id,task_id,revision,digest,status,summary,operations,created_at", id, org, task, rev, d, summary, b, actor).Scan(&x.ID, &x.OrgID, &x.TaskID, &x.Revision, &x.Digest, &x.Status, &x.Summary, &b, &t)
+		if e := tx.QueryRow(ctx, "insert into proposals(id,org_id,task_id,revision,digest,status,summary,operations,created_by) values($1,$2,$3,$4,$5,'pending_endorsement',$6,$7,$8) returning id,org_id,task_id,revision,digest,status,summary,operations,created_at", id, org, task, rev, d, summary, b, actor).Scan(&x.ID, &x.OrgID, &x.TaskID, &x.Revision, &x.Digest, &x.Status, &x.Summary, &b, &t); e != nil {
+			return e
+		}
+		return reserveBusinessOperations(ctx, tx, org, id, ops)
 	})
 	_ = json.Unmarshal(b, &x.Operations)
 	x.CreatedAt = scanTime(&t)
@@ -440,6 +443,9 @@ func (s *Store) Decide(ctx context.Context, org, proposal, actor, role, kind str
 			_, e = tx.Exec(ctx, "update proposals set status='pending_approval' where org_id=$1 and id=$2 and status='pending_endorsement'", org, proposal)
 		case "reject":
 			_, e = tx.Exec(ctx, "update proposals set status='rejected' where org_id=$1 and id=$2 and status in ('pending_endorsement','pending_approval')", org, proposal)
+			if e == nil {
+				e = releaseBusinessOperations(ctx, tx, org, proposal)
+			}
 		case "approve":
 			var taskStatus string
 			if e = tx.QueryRow(ctx, "select status from tasks where org_id=$1 and id=$2", org, task).Scan(&taskStatus); e == nil && taskStatus == "cancelled" {
@@ -450,7 +456,10 @@ func (s *Store) Decide(ctx context.Context, org, proposal, actor, role, kind str
 				return errors.New("proposal is not pending approval")
 			}
 			if e == nil {
-				_, e = tx.Exec(ctx, "insert into effects(id,org_id,proposal_id,operation_id,integration,action,target_id,expected_version,payload,state) select gen_random_uuid()::text,org_id,id,(op->>'id'),(op->>'integration'),(op->>'action'),(op->>'target_id'),(op->>'expected_version')::bigint,op->'payload','authorized' from proposals p cross join lateral jsonb_array_elements(p.operations) op where p.org_id=$1 and p.id=$2 on conflict do nothing", org, proposal)
+				_, e = tx.Exec(ctx, "insert into effects(id,org_id,proposal_id,operation_id,integration,action,target_id,expected_version,payload,state,business_operation_id) select gen_random_uuid()::text,p.org_id,p.id,(op->>'id'),(op->>'integration'),(op->>'action'),(op->>'target_id'),(op->>'expected_version')::bigint,op->'payload','authorized',bo.id from proposals p cross join lateral jsonb_array_elements(p.operations) op left join business_operations bo on bo.org_id=p.org_id and bo.integration=(op->>'integration') and bo.action=(op->>'action') and bo.business_key=(op->>'business_key') where p.org_id=$1 and p.id=$2 on conflict do nothing", org, proposal)
+			}
+			if e == nil {
+				_, e = tx.Exec(ctx, "update business_operations set status='dispatching',updated_at=clock_timestamp() where org_id=$1 and proposal_id=$2 and status='reserved'", org, proposal)
 			}
 			if e == nil {
 				e = s.riverInsertTx(ctx, tx, ProposalExecuteArgs{OrgID: org, ProposalID: proposal})
@@ -763,6 +772,10 @@ func (s *Store) applyProposal(ctx context.Context, reg *connectors.Registry, org
 			if _, e = tx.Exec(ctx, "insert into receipts(id,org_id,effect_id,kind,outcome_code,result) values($1,$2,$3,'simulator','applied',$4)", rid, org, eid, nb); e != nil {
 				return e
 			}
+		}
+		_, e = tx.Exec(ctx, "update business_operations set status='verified',updated_at=clock_timestamp() where org_id=$1 and proposal_id=$2 and status='dispatching'", org, pid)
+		if e != nil {
+			return e
 		}
 		_, e = tx.Exec(ctx, "update proposals set status='done' where org_id=$1 and id=$2", org, pid)
 		if e == nil {

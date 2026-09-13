@@ -94,7 +94,7 @@ func TestHTTPProposalAuthorizationDigestAndIdempotency(t *testing.T) {
 			targetVersion = rec["version"]
 		}
 	}
-	status, p := f.do("req", "POST", "/api/v1/tasks/"+tid+"/proposals", map[string]any{"summary": "S", "operations": []map[string]any{{"integration": "inventory", "action": "adjust", "target_id": "org-fixture-a-inventory", "expected_version": targetVersion, "payload": map[string]any{"delta": 1}}}})
+	status, p := f.do("req", "POST", "/api/v1/tasks/"+tid+"/proposals", map[string]any{"summary": "S", "operations": []map[string]any{{"integration": "inventory", "action": "adjust", "business_key": platform.NewID(), "target_id": "org-fixture-a-inventory", "expected_version": targetVersion, "payload": map[string]any{"delta": 1}}}})
 	if status != 201 {
 		t.Fatalf("proposal: %d %#v", status, p)
 	}

@@ -144,6 +144,58 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		} else {
 			fail(w, e)
 		}
+	case path == "/registry/releases" && r.Method == "GET":
+		x, e := s.store.ListRegistryReleases(ctx, id.OrgID)
+		respond(w, x, e)
+	case path == "/registry/releases" && r.Method == "POST":
+		var q store.RegistryCreate
+		if decode(r, &q) != nil || q.Family == "" || q.Kind == "" || q.Version == "" || q.Digest == "" {
+			failCode(w, 422, "invalid_request", "family, kind, version, and digest are required")
+			return
+		}
+		if q.Kind != "connector" && q.Kind != "harness" && q.Kind != "renderer" && q.Kind != "automation" {
+			failCode(w, 422, "invalid_request", "unsupported registry kind")
+			return
+		}
+		x, e := s.store.CreateRegistryRelease(ctx, id.OrgID, id.ID, q)
+		if e == nil {
+			jsonWrite(w, 201, x)
+		} else {
+			fail(w, e)
+		}
+	case strings.HasPrefix(path, "/registry/releases/") && r.Method == "GET":
+		p := strings.Split(strings.Trim(path, "/"), "/")
+		if len(p) != 3 {
+			failCode(w, 404, "not_found", "not found")
+			return
+		}
+		x, e := s.store.GetRegistryRelease(ctx, id.OrgID, p[2])
+		if e == nil {
+			jsonWrite(w, 200, x)
+		} else {
+			fail(w, e)
+		}
+	case strings.HasPrefix(path, "/registry/releases/") && strings.HasSuffix(path, "/transition") && r.Method == "POST":
+		p := strings.Split(strings.Trim(path, "/"), "/")
+		if len(p) != 4 {
+			failCode(w, 404, "not_found", "not found")
+			return
+		}
+		var q struct {
+			ExpectedVersion int64  `json:"expected_version"`
+			TargetState     string `json:"target_state"`
+			Reason          string `json:"reason"`
+		}
+		if decode(r, &q) != nil || q.ExpectedVersion < 1 || q.TargetState == "" {
+			failCode(w, 422, "invalid_request", "expected_version and target_state are required")
+			return
+		}
+		x, e := s.store.TransitionRegistryRelease(ctx, id.OrgID, p[2], id.ID, id.Role, q.TargetState, q.Reason, q.ExpectedVersion)
+		if e == nil {
+			jsonWrite(w, 200, x)
+		} else {
+			fail(w, e)
+		}
 	case path == "/integrations" && r.Method == "GET":
 		jsonWrite(w, 200, map[string]any{"items": s.registry.List()})
 	case strings.HasPrefix(path, "/integrations/") && strings.HasSuffix(path, "/records") && r.Method == "GET":

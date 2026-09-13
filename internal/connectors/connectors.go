@@ -19,6 +19,7 @@ type Operation struct {
 	ID              string          `json:"id"`
 	Integration     string          `json:"integration"`
 	Action          string          `json:"action"`
+	BusinessKey     string          `json:"business_key"`
 	TargetID        string          `json:"target_id"`
 	ExpectedVersion int             `json:"expected_version"`
 	Payload         json.RawMessage `json:"payload"`

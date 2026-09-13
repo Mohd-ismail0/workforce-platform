@@ -53,7 +53,7 @@ func proposal(t *testing.T, s *Store, org, req string) (Task, Proposal) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	p, e := s.CreateProposal(ctx, org, task.ID, req, "test", []connectors.Operation{{ID: platform.NewID(), Integration: "inventory", Action: "adjust", TargetID: target, ExpectedVersion: 1, Payload: json.RawMessage(`{"delta":1}`)}})
+	p, e := s.CreateProposal(ctx, org, task.ID, req, "test", []connectors.Operation{{ID: platform.NewID(), Integration: "inventory", Action: "adjust", BusinessKey: platform.NewID(), TargetID: target, ExpectedVersion: 1, Payload: json.RawMessage(`{"delta":1}`)}})
 	if e != nil {
 		t.Fatal(e)
 	}
