@@ -126,6 +126,45 @@ expect("cross-org task read denied", code, 404)
 code, _ = call(other, "GET", "/registry/releases", expect=200)
 expect("other org sees only its own releases", any(r["id"] == rel["id"] for r in _["items"]), False)
 
+# 5. Agent runs: the gate, the run, and the fact that a run only ever prepares work.
+admin_tok = admin
+_, run_task = call(requester, "POST", "/tasks", {"title": "live agent run"}, expect=201)
+_, agent = call(requester, "POST", "/agents", {"name": "Live Check Agent", "harness": "simulator"}, expect=201)
+run_body = {"agent_id": agent["id"], "intent": "inventory"}
+code, first = call(requester, "POST", f"/tasks/{run_task['id']}/runs", run_body)
+if code == 409:
+    expect("run refused without an active harness", first["error"]["code"], "no_active_harness")
+    revision = None
+    code, hrel = call(admin_tok, "POST", "/registry/releases", {
+        "family": "harness-live-" + stamp, "kind": "harness", "version": "1.0.0-" + stamp,
+        "digest": "sha256:live-" + stamp, "requested_capabilities": ["prepare_proposal"],
+        "simulation": True, "compatibility_range": ">=1"})
+    expect("harness release registered", code, 201)
+    for step in ("verified", "approved", "installed", "active"):
+        code, hrel = call(admin_tok, "POST", f"/registry/releases/{hrel['id']}/transition",
+                          {"expected_version": hrel["revision"], "target_state": step, "reason": "live check"})
+        expect(f"harness promoted to {step}", code, 200)
+    code, first = call(requester, "POST", f"/tasks/{run_task['id']}/runs", run_body)
+expect("run accepted once a harness is active", code, 201)
+expect("run queued, not falsely working", first["status"], "queued")
+expect("run records its harness release", bool(first["harness_release_id"]), True)
+
+finished = {}
+for _ in range(60):
+    _, finished = call(requester, "GET", f"/runs/{first['id']}", expect=200)
+    if finished["status"] in ("succeeded", "failed"):
+        break
+    time.sleep(0.5)
+expect("run completed", finished["status"], "succeeded")
+expect("run recorded a finish time", bool(finished["finished_at"]), True)
+expect("run linked a proposal", bool(finished["proposal_id"]), True)
+if finished["proposal_id"]:
+    _, rp = call(requester, "GET", f"/proposals/{finished['proposal_id']}", expect=200)
+    expect("run output still needs endorsement", rp["status"], "pending_endorsement")
+code, _ = call(other, "GET", f"/runs/{first['id']}")
+expect("cross-org run read denied", code, 404)
+
+
 width = max(len(n) for n, _, _ in checks)
 for name, got, want in checks:
     print(f"  {name:<{width}}  got={got!r:<12} want={want!r:<12} {'OK' if got == want else 'MISMATCH'}")

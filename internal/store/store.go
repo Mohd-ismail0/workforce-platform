@@ -646,6 +646,7 @@ func (s *Store) RunWorker(ctx context.Context, reg *connectors.Registry) error {
 	}
 	workers := river.NewWorkers()
 	river.AddWorker(workers, &proposalExecuteWorker{store: s, registry: reg})
+	river.AddWorker(workers, &agentRunWorker{store: s})
 	client, err := river.NewClient(riverpgxv5.New(s.Pool), &river.Config{
 		Queues:  map[string]river.QueueConfig{river.QueueDefault: {MaxWorkers: 1}},
 		Workers: workers,

@@ -6,7 +6,7 @@ import {
   waitFor,
   cleanup,
 } from "@testing-library/react";
-import { HandoffForms, Login, Registry, TaskDetail } from "./main";
+import { HandoffForms, Login, Registry, Runs, TaskDetail } from "./main";
 import { setToken } from "./api";
 import React from "react";
 
@@ -62,7 +62,9 @@ describe("handoff UI", () => {
         summary: "Please take this",
       }),
     );
-    expect(screen.queryByRole("form", { name: "Accept handoff offer" })).toBeNull();
+    expect(
+      screen.queryByRole("form", { name: "Accept handoff offer" }),
+    ).toBeNull();
   });
   it("shows real API errors", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
@@ -92,40 +94,225 @@ describe("registry and proposal controls", () => {
     cleanup();
     vi.restoreAllMocks();
   });
-  const release = { id: "rel-1", family: "payments", kind: "connector", version: "1.2.3", digest: "sha256:x", state: "quarantined", requested_capabilities: ["read"], granted_capabilities: [], compatibility: {}, simulation: true, provenance: "test", license: "MIT", created_by: "person-1" };
+  const release = {
+    id: "rel-1",
+    family: "payments",
+    kind: "connector",
+    version: "1.2.3",
+    digest: "sha256:x",
+    state: "quarantined",
+    requested_capabilities: ["read"],
+    granted_capabilities: [],
+    compatibility: {},
+    simulation: true,
+    provenance: "test",
+    license: "MIT",
+    created_by: "person-1",
+  };
   it("posts business_key in a proposal", async () => {
-    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
-      if (String(input).includes("/records")) return new Response(JSON.stringify({ items: [{ id: "target-1", version: 4 }] }), { status: 200 });
-      return new Response(JSON.stringify({}), { status: 200 });
-    });
-    render(<TaskDetail task={task} close={vi.fn()} refresh={vi.fn()} setError={vi.fn()} />);
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async (input) => {
+        if (String(input).includes("/records"))
+          return new Response(
+            JSON.stringify({ items: [{ id: "target-1", version: 4 }] }),
+            { status: 200 },
+          );
+        return new Response(JSON.stringify({}), { status: 200 });
+      });
+    render(
+      <TaskDetail
+        task={task}
+        close={vi.fn()}
+        refresh={vi.fn()}
+        setError={vi.fn()}
+      />,
+    );
     fireEvent.click(screen.getByText("Build proposal"));
-    fireEvent.change(screen.getAllByLabelText("Summary")[screen.getAllByLabelText("Summary").length - 1], { target: { value: "Do it" } });
-    fireEvent.change(screen.getByRole("textbox", { name: "Business operation key" }), { target: { value: "invoice-42" } });
-    fireEvent.change(screen.getByRole("textbox", { name: "Target ID" }), { target: { value: "target-1" } });
+    fireEvent.change(
+      screen.getAllByLabelText("Summary")[
+        screen.getAllByLabelText("Summary").length - 1
+      ],
+      { target: { value: "Do it" } },
+    );
+    fireEvent.change(
+      screen.getByRole("textbox", { name: "Business operation key" }),
+      { target: { value: "invoice-42" } },
+    );
+    fireEvent.change(screen.getByRole("textbox", { name: "Target ID" }), {
+      target: { value: "target-1" },
+    });
     fireEvent.click(screen.getByText("Capture target version"));
-    await waitFor(() => expect(screen.getAllByRole("status").some((x) => x.textContent?.includes("Captured version: v4"))).toBe(true));
+    await waitFor(() =>
+      expect(
+        screen
+          .getAllByRole("status")
+          .some((x) => x.textContent?.includes("Captured version: v4")),
+      ).toBe(true),
+    );
     fireEvent.click(screen.getByText("Create proposal"));
-    await waitFor(() => expect(fetchMock.mock.calls.some(([, init]) => String(init?.body).includes("business_key"))).toBe(true));
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.some(([, init]) =>
+          String(init?.body).includes("business_key"),
+        ),
+      ).toBe(true),
+    );
   });
   it("renders mocked registry releases", async () => {
-    vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(JSON.stringify({ items: [release] }), { status: 200 }));
-    render(<Registry me={{ id: "p", org_id: "o", role: "requester", name: "Requester" }} setError={vi.fn()} />);
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async () =>
+        new Response(JSON.stringify({ items: [release] }), { status: 200 }),
+    );
+    render(
+      <Registry
+        me={{ id: "p", org_id: "o", role: "requester", name: "Requester" }}
+        setError={vi.fn()}
+      />,
+    );
     await waitFor(() => expect(screen.getByText("payments")).toBeTruthy());
     expect(screen.getByText("SIMULATION")).toBeTruthy();
   });
   it("only shows lifecycle transition buttons to admins", async () => {
-    vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(JSON.stringify({ items: [release] }), { status: 200 }));
-    const requester = { id: "p", org_id: "o", role: "requester" as const, name: "Requester" };
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async () =>
+        new Response(JSON.stringify({ items: [release] }), { status: 200 }),
+    );
+    const requester = {
+      id: "p",
+      org_id: "o",
+      role: "requester" as const,
+      name: "Requester",
+    };
     render(<Registry me={requester} setError={vi.fn()} />);
     await waitFor(() => expect(screen.getByText("payments")).toBeTruthy());
     expect(screen.queryByRole("button", { name: "active" })).toBeNull();
     cleanup();
-    render(<Registry me={{ ...requester, role: "admin" }} setError={vi.fn()} />);
-    await waitFor(() => expect(screen.getByRole("button", { name: "active" })).toBeTruthy());
+    render(
+      <Registry me={{ ...requester, role: "admin" }} setError={vi.fn()} />,
+    );
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "active" })).toBeTruthy(),
+    );
   });
 });
 
+describe("agent runs", () => {
+  beforeEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
+  });
+  const run = {
+    id: "run-1",
+    org_id: "o",
+    task_id: "task-1",
+    agent_id: "agent-1",
+    harness: "sim",
+    harness_release_id: "rel",
+    runner_id: "simulator",
+    intent: "Prepare proposal",
+    status: "queued",
+    proposal_id: null,
+    result_summary: null,
+    failure_reason: null,
+    notes: [],
+    created_by: "p",
+    version: 1,
+    created_at: "",
+  };
+  it("posts agent_id and intent and renders returned status", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(
+        new Response(JSON.stringify({ ...run, status: "running" }), {
+          status: 201,
+        }),
+      );
+    render(
+      <TaskDetail
+        task={task}
+        close={vi.fn()}
+        refresh={vi.fn()}
+        setError={vi.fn()}
+      />,
+    );
+    fireEvent.change(screen.getByLabelText("Agent ID"), {
+      target: { value: "agent-1" },
+    });
+    fireEvent.change(screen.getByLabelText("Intent"), {
+      target: { value: "Prepare proposal" },
+    });
+    fireEvent.submit(screen.getByRole("form", { name: "Start run" }));
+    await waitFor(() =>
+      expect(
+        screen
+          .getAllByRole("status")
+          .some((x) => x.textContent?.includes("running")),
+      ).toBe(true),
+    );
+    expect(fetchMock.mock.calls[0][1]?.body).toBe(
+      JSON.stringify({ agent_id: "agent-1", intent: "Prepare proposal" }),
+    );
+  });
+  it("renders the backend 409 error verbatim", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          error: {
+            message: "No active harness release exists in the registry",
+          },
+        }),
+        { status: 409 },
+      ),
+    );
+    render(
+      <TaskDetail
+        task={task}
+        close={vi.fn()}
+        refresh={vi.fn()}
+        setError={vi.fn()}
+      />,
+    );
+    fireEvent.change(screen.getByLabelText("Agent ID"), {
+      target: { value: "agent-1" },
+    });
+    fireEvent.change(screen.getByLabelText("Intent"), {
+      target: { value: "x" },
+    });
+    fireEvent.submit(screen.getByRole("form", { name: "Start run" }));
+    await waitFor(() =>
+      expect(
+        screen
+          .getAllByRole("status")
+          .some((x) =>
+            x.textContent?.includes(
+              "No active harness release exists in the registry",
+            ),
+          ),
+      ).toBe(true),
+    );
+  });
+  it("renders a failed run failure reason", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          items: [
+            {
+              ...run,
+              status: "failed",
+              failure_reason: "Harness release blocked",
+            },
+          ],
+        }),
+        { status: 200 },
+      ),
+    );
+    render(<Runs setError={vi.fn()} />);
+    await waitFor(() =>
+      expect(screen.getByText("Harness release blocked")).toBeTruthy(),
+    );
+  });
+});
 describe("login", () => {
   it("does not call network while typing", () => {
     const fetchMock = vi.spyOn(globalThis, "fetch");

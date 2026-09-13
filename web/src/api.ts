@@ -39,13 +39,24 @@ export type RegistryRelease = {
 };
 
 export const listRegistryReleases = async () => {
-  const body = await api<{ items?: RegistryRelease[] } | RegistryRelease[]>("/registry/releases");
+  const body = await api<{ items?: RegistryRelease[] } | RegistryRelease[]>(
+    "/registry/releases",
+  );
   return Array.isArray(body) ? body : body.items || [];
 };
 export const createRegistryRelease = (body: Record<string, unknown>) =>
-  api<RegistryRelease>("/registry/releases", { method: "POST", body: JSON.stringify(body) });
-export const transitionRegistryRelease = (id: string, body: Record<string, unknown>) =>
-  api<RegistryRelease>(`/registry/releases/${id}/transition`, { method: "POST", body: JSON.stringify(body) });
+  api<RegistryRelease>("/registry/releases", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+export const transitionRegistryRelease = (
+  id: string,
+  body: Record<string, unknown>,
+) =>
+  api<RegistryRelease>(`/registry/releases/${id}/transition`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
 
 export type Proposal = {
   id: string;
@@ -68,7 +79,38 @@ export type HandoffOffer = {
   created_at: string;
 };
 
+export type AgentRun = {
+  id: string;
+  org_id: string;
+  task_id: string;
+  agent_id: string;
+  harness: string;
+  harness_release_id: string;
+  runner_id: string;
+  intent: string;
+  status: "queued" | "running" | "succeeded" | "failed" | "cancelled";
+  proposal_id?: string | null;
+  result_summary?: string | null;
+  failure_reason?: string | null;
+  notes: string[];
+  created_by: string;
+  version: number;
+  created_at: string;
+  started_at?: string | null;
+  finished_at?: string | null;
+};
+
 export const listHandoffs = () => list<HandoffOffer>("/handoffs");
+export const listRuns = () => list<AgentRun>("/runs");
+export const getRun = (id: string) => api<AgentRun>(`/runs/${id}`);
+export const startRun = (
+  taskId: string,
+  body: { agent_id: string; intent: string },
+) =>
+  api<AgentRun>(`/tasks/${taskId}/runs`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
 
 const tokenKey = "workforce.local.token";
 export const getToken = () => sessionStorage.getItem(tokenKey) || "";

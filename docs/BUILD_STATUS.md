@@ -22,8 +22,11 @@ This is a partial working platform foundation, not completion of the full build 
 
 ## Known limitations — do not enable real business writes
 
+- **Harness execution is a simulator.** The only runner is an in-process, deterministic simulator that prepares a proposal. It does not launch a real coding harness, does not run external commands and does not call a network or model provider. Registering a harness release does not make that harness executable.
+- Agent runs are gated on an **active harness release** in the registry; without one a run is refused with `no_active_harness`. A quarantined release never unlocks runs, and only an operator may promote one.
 - Local opaque-token development authentication only; OIDC/OpenFGA not implemented. Coarse organization visibility is not resource-level/matrix organization authorization.
-- Agent definitions are registry metadata; no harness subprocess execution, hardened remote runner, executable-package SDK or plugin installation lifecycle yet.
+- Agent-run execution seam: `agent_runs` lifecycle (queued → running → succeeded/failed) dispatched through River, where the runner may only *prepare* a proposal. A run never endorses, approves or executes; its output lands in the normal review path.
+- Agent definitions are registry metadata; no real harness subprocess execution, hardened remote runner, executable-package SDK or plugin installation lifecycle yet.
 - All external destinations are simulator records in the same PostgreSQL transaction. This establishes local transaction/readback behavior, NOT external provider idempotency, unknown outcomes, distributed partial failures or business correctness.
 - No generalized durable gates, quorum, expiry, full audit immutability or effect broker credentials yet.
 - Limited task authorization and same-org role semantics need tightening before shared-user rollout. Per-request identity lookup is not a complete atomic revocation protocol for all operations.

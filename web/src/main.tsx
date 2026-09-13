@@ -9,6 +9,8 @@ import {
   list,
   listHandoffs,
   listRegistryReleases,
+  listRuns,
+  startRun,
   createRegistryRelease,
   transitionRegistryRelease,
   Me,
@@ -29,6 +31,7 @@ const nav = [
   "Agents",
   "Activity & receipts",
   "Handoffs",
+  "Runs",
   "Registry",
 ];
 const statuses = [
@@ -154,7 +157,16 @@ export function HandoffForms({
         </label>
         <button className="primary">Offer handoff</button>
       </form>
-      <p role="status">{offerId ? <>Offer created: <code>{offerId}</code>. Incoming offers appear in Handoffs, where only the intended recipient can accept.</> : "Incoming offers appear in Handoffs, where only the intended recipient can accept."}</p>
+      <p role="status">
+        {offerId ? (
+          <>
+            Offer created: <code>{offerId}</code>. Incoming offers appear in
+            Handoffs, where only the intended recipient can accept.
+          </>
+        ) : (
+          "Incoming offers appear in Handoffs, where only the intended recipient can accept."
+        )}
+      </p>
     </section>
   );
 }
@@ -236,7 +248,7 @@ function Shell({
               onClick={() => setPage(n)}
             >
               <span className="nav-icon">
-                {["⌂", "▦", "✓", "◈", "◎", "≋", "⇄", "◇"][i]}
+                {["⌂", "▦", "✓", "◈", "◎", "≋", "⇄", "▶", "◇"][i]}
               </span>
               {n}
             </button>
@@ -287,16 +299,164 @@ function Page({
   if (page === "Agents") return <Agents setError={setError} />;
   if (page === "Activity & receipts") return <Activity setError={setError} />;
   if (page === "Handoffs") return <Handoffs me={me} setError={setError} />;
+  if (page === "Runs") return <Runs setError={setError} />;
   if (page === "Registry") return <Registry me={me} setError={setError} />;
   return <Overview me={me} setError={setError} />;
 }
-export function Handoffs({ me, setError }: { me: Me; setError: (v: string) => void }) {
+export function Runs({ setError }: { setError: (v: string) => void }) {
+  const [items, setItems] = useState<import("./api").AgentRun[]>([]);
+  const [loading, setLoading] = useState(true);
+  const load = () => {
+    setLoading(true);
+    listRuns()
+      .then(setItems)
+      .catch((e) => setError(e.message))
+      .finally(() => setLoading(false));
+  };
+  useEffect(() => {
+    load();
+  }, []);
+  const active = items.some(
+    (run) => run.status === "queued" || run.status === "running",
+  );
+  useEffect(() => {
+    if (!active) return;
+    const timer = window.setInterval(load, 2000);
+    return () => window.clearInterval(timer);
+  }, [active]);
+  return (
+    <section aria-label="Agent runs">
+      <div className="alert error">
+        <strong>SIMULATOR runner only:</strong> The only available runner is an
+        in-process SIMULATOR that prepares a proposal. It does not execute a
+        real AI coding harness, does not run external commands, and its output
+        still requires endorsement, approval and the normal governed execution
+        path.
+      </div>
+      <div className="toolbar">
+        <div>
+          <h2>Agent runs</h2>
+          <p className="muted">
+            Queued runs are not shown as working; only running runs are active.
+          </p>
+        </div>
+        <button className="button" onClick={load}>
+          Refresh
+        </button>
+      </div>
+      {loading ? (
+        <p className="muted">Loading runs…</p>
+      ) : !items.length ? (
+        empty
+      ) : (
+        <div className="table">
+          {items.map((run) => (
+            <article className="table-row" key={run.id}>
+              <div>
+                <strong>{run.harness}</strong>
+                <span className="muted">Runner: {run.runner_id}</span>
+              </div>
+              <span className="status-chip">{run.status}</span>
+              <div>
+                <span className="label">INTENT</span>
+                <p>{run.intent}</p>
+                <span className="muted">
+                  Task <code>{run.task_id}</code>
+                </span>
+              </div>
+              <div>
+                {run.status === "failed" ||
+                run.status === "cancelled" ||
+                run.failure_reason ? (
+                  <strong>{run.failure_reason || "Run blocked"}</strong>
+                ) : (
+                  run.result_summary || "No result yet"
+                )}
+              </div>
+              {run.proposal_id && (
+                <a href={`#proposal-${run.proposal_id}`}>
+                  Proposal {run.proposal_id}
+                </a>
+              )}
+            </article>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+export function Handoffs({
+  me,
+  setError,
+}: {
+  me: Me;
+  setError: (v: string) => void;
+}) {
   const [items, setItems] = useState<import("./api").HandoffOffer[]>([]);
   const [loading, setLoading] = useState(true);
-  const load = () => { setLoading(true); listHandoffs().then(setItems).catch((e) => setError(e.message)).finally(() => setLoading(false)); };
+  const load = () => {
+    setLoading(true);
+    listHandoffs()
+      .then(setItems)
+      .catch((e) => setError(e.message))
+      .finally(() => setLoading(false));
+  };
   useEffect(load, []);
-  const accept = async (id: string) => { try { await acceptHandoff(id); load(); } catch (e) { setError((e as Error).message); } };
-  return <section aria-label="Handoff inbox"><div className="toolbar"><div><h2>Handoffs</h2><p className="muted">Incoming offers for you and outgoing offers you created.</p></div><button className="button" onClick={load}>Refresh</button></div>{loading ? <p className="muted">Loading handoffs…</p> : !items.length ? empty : <div className="handoff-list">{items.map((h) => { const incoming = h.recipient_id === me.id; return <article className="panel handoff-card" key={h.id}><div className="handoff-head"><span className="tag">{incoming ? "INCOMING" : "OUTGOING"}</span><span className="status-chip">{h.state}</span></div><h3>{h.summary}</h3><p className="muted">Task <code>{h.task_id}</code> · role: {h.role}</p><small className="muted">Created {h.created_at}</small>{incoming && h.state === "offered" && <button className="primary" onClick={() => accept(h.id)}>Accept handoff</button>}</article>;})}</div>}</section>;
+  const accept = async (id: string) => {
+    try {
+      await acceptHandoff(id);
+      load();
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+  return (
+    <section aria-label="Handoff inbox">
+      <div className="toolbar">
+        <div>
+          <h2>Handoffs</h2>
+          <p className="muted">
+            Incoming offers for you and outgoing offers you created.
+          </p>
+        </div>
+        <button className="button" onClick={load}>
+          Refresh
+        </button>
+      </div>
+      {loading ? (
+        <p className="muted">Loading handoffs…</p>
+      ) : !items.length ? (
+        empty
+      ) : (
+        <div className="handoff-list">
+          {items.map((h) => {
+            const incoming = h.recipient_id === me.id;
+            return (
+              <article className="panel handoff-card" key={h.id}>
+                <div className="handoff-head">
+                  <span className="tag">
+                    {incoming ? "INCOMING" : "OUTGOING"}
+                  </span>
+                  <span className="status-chip">{h.state}</span>
+                </div>
+                <h3>{h.summary}</h3>
+                <p className="muted">
+                  Task <code>{h.task_id}</code> · role: {h.role}
+                </p>
+                <small className="muted">Created {h.created_at}</small>
+                {incoming && h.state === "offered" && (
+                  <button className="primary" onClick={() => accept(h.id)}>
+                    Accept handoff
+                  </button>
+                )}
+              </article>
+            );
+          })}
+        </div>
+      )}
+    </section>
+  );
 }
 function Overview({ me, setError }: { me: Me; setError: (v: string) => void }) {
   const [tasks, setTasks] = useState<Task[]>([]);
@@ -458,9 +618,16 @@ function Projects({ setError }: { setError: (v: string) => void }) {
           </label>
           <label>
             Project (optional)
-            <select value={selectedProject} onChange={(e) => setSelectedProject(e.target.value)}>
+            <select
+              value={selectedProject}
+              onChange={(e) => setSelectedProject(e.target.value)}
+            >
               <option value="">No project</option>
-              {projects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+              {projects.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name}
+                </option>
+              ))}
             </select>
           </label>
           <button className="primary">Create task</button>
@@ -536,6 +703,9 @@ export function TaskDetail({
   const [target, setTarget] = useState("");
   const [targetVersion, setTargetVersion] = useState<number>();
   const [targetVersionError, setTargetVersionError] = useState("");
+  const [agentId, setAgentId] = useState("");
+  const [runIntent, setRunIntent] = useState("");
+  const [runStatus, setRunStatus] = useState("");
   const [values, setValues] = useState<Record<string, string>>({
     delta: "0",
     recipients: "",
@@ -571,10 +741,27 @@ export function TaskDetail({
       setError((e as Error).message);
     }
   };
+  const start = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      const run = await startRun(task.id, {
+        agent_id: agentId,
+        intent: runIntent,
+      });
+      setRunStatus(
+        `Run ${run.id} started with status: ${run.status}. See the Runs page.`,
+      );
+    } catch (e) {
+      setRunStatus((e as Error).message);
+    }
+  };
   const submitProposal = async (e: React.FormEvent) => {
     e.preventDefault();
     if (targetVersion === undefined) {
-      setError(targetVersionError || "Capture the target's current version before creating a proposal.");
+      setError(
+        targetVersionError ||
+          "Capture the target's current version before creating a proposal.",
+      );
       return;
     }
     try {
@@ -635,6 +822,27 @@ export function TaskDetail({
           Add dependency
         </button>
         <HandoffForms task={task} setError={setError} onAccepted={refresh} />
+        <form className="composer" onSubmit={start} aria-label="Start run">
+          <h3>Start run</h3>
+          <label>
+            Agent ID
+            <input
+              required
+              value={agentId}
+              onChange={(e) => setAgentId(e.target.value)}
+            />
+          </label>
+          <label>
+            Intent
+            <textarea
+              required
+              value={runIntent}
+              onChange={(e) => setRunIntent(e.target.value)}
+            />
+          </label>
+          <button className="primary">Start run</button>
+          <p role="status">{runStatus}</p>
+        </form>
         {proposal && (
           <form className="composer" onSubmit={submitProposal}>
             <label>
@@ -647,8 +855,16 @@ export function TaskDetail({
             </label>
             <label>
               Business operation key
-              <input aria-label="Business operation key" required value={businessKey} onChange={(e) => setBusinessKey(e.target.value)} />
-              <small className="muted">The same key prevents duplicate official effects across retries and re-runs.</small>
+              <input
+                aria-label="Business operation key"
+                required
+                value={businessKey}
+                onChange={(e) => setBusinessKey(e.target.value)}
+              />
+              <small className="muted">
+                The same key prevents duplicate official effects across retries
+                and re-runs.
+              </small>
             </label>
             <label>
               Integration
@@ -684,19 +900,38 @@ export function TaskDetail({
                 onChange={(e) => setTarget(e.target.value)}
               />
             </label>
-            <button type="button" className="button" disabled={!target} onClick={async () => {
-              setTargetVersionError("");
-              try {
-                const rows = await list<any>(`/integrations/${integration}/records`);
-                const record = rows.find((r) => String(r.id ?? r.record_id) === target);
-                if (!record || typeof record.version !== "number") throw new Error("Target record not found or has no version.");
-                setTargetVersion(record.version);
-              } catch (e) {
-                setTargetVersion(undefined);
-                setTargetVersionError((e as Error).message);
-              }
-            }}>Capture target version</button>
-            <p className="muted" role="status">{targetVersion !== undefined ? `Captured version: v${targetVersion}` : targetVersionError || "No target version captured; new records are not auto-approved."}</p>
+            <button
+              type="button"
+              className="button"
+              disabled={!target}
+              onClick={async () => {
+                setTargetVersionError("");
+                try {
+                  const rows = await list<any>(
+                    `/integrations/${integration}/records`,
+                  );
+                  const record = rows.find(
+                    (r) => String(r.id ?? r.record_id) === target,
+                  );
+                  if (!record || typeof record.version !== "number")
+                    throw new Error(
+                      "Target record not found or has no version.",
+                    );
+                  setTargetVersion(record.version);
+                } catch (e) {
+                  setTargetVersion(undefined);
+                  setTargetVersionError((e as Error).message);
+                }
+              }}
+            >
+              Capture target version
+            </button>
+            <p className="muted" role="status">
+              {targetVersion !== undefined
+                ? `Captured version: v${targetVersion}`
+                : targetVersionError ||
+                  "No target version captured; new records are not auto-approved."}
+            </p>
             {integration === "inventory" && (
               <label>
                 Delta
@@ -1145,38 +1380,162 @@ function Agents({ setError }: { setError: (v: string) => void }) {
     </>
   );
 }
-export function Registry({ me, setError }: { me: Me; setError: (v: string) => void }) {
-  const [releases, setReleases] = useState<import("./api").RegistryRelease[]>([]);
+export function Registry({
+  me,
+  setError,
+}: {
+  me: Me;
+  setError: (v: string) => void;
+}) {
+  const [releases, setReleases] = useState<import("./api").RegistryRelease[]>(
+    [],
+  );
   const [reason, setReason] = useState("");
-  const [form, setForm] = useState({ family: "", kind: "", version: "", digest: "", requested_capabilities: "", simulation: false, provenance: "", license: "" });
-  const load = () => listRegistryReleases().then(setReleases).catch((e) => setError(e.message));
-  useEffect(() => { load(); }, []);
+  const [form, setForm] = useState({
+    family: "",
+    kind: "",
+    version: "",
+    digest: "",
+    requested_capabilities: "",
+    simulation: false,
+    provenance: "",
+    license: "",
+  });
+  const load = () =>
+    listRegistryReleases()
+      .then(setReleases)
+      .catch((e) => setError(e.message));
+  useEffect(() => {
+    load();
+  }, []);
   const transition = async (id: string, state: string) => {
-    try { await transitionRegistryRelease(id, { state, reason }); setReason(""); load(); } catch (e) { setError((e as Error).message); }
+    try {
+      await transitionRegistryRelease(id, { state, reason });
+      setReason("");
+      load();
+    } catch (e) {
+      setError((e as Error).message);
+    }
   };
   const create = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
-      const created = await createRegistryRelease({ ...form, requested_capabilities: form.requested_capabilities.split(",").map((x) => x.trim()).filter(Boolean), state: "quarantined" });
+      const created = await createRegistryRelease({
+        ...form,
+        requested_capabilities: form.requested_capabilities
+          .split(",")
+          .map((x) => x.trim())
+          .filter(Boolean),
+        state: "quarantined",
+      });
       setReleases((items) => [...items, created]);
-    } catch (e) { setError((e as Error).message); }
+    } catch (e) {
+      setError((e as Error).message);
+    }
   };
-  const targets = ["verified", "approved", "installed", "active", "draining", "disabled", "revoked"];
-  return <section aria-label="Registry">
-    <div className="alert">The registry stores metadata and lifecycle only; it does not upload executables or execute plugins.</div>
-    <div className="toolbar"><div><h2>Registry</h2><p className="muted">Release metadata and lifecycle state.</p></div><button className="button" onClick={load}>Refresh</button></div>
-    {me.role === "admin" && <form className="composer" onSubmit={create} aria-label="Create registry release">
-      {(["family", "kind", "version", "digest", "requested_capabilities", "provenance", "license"] as const).map((key) => <label key={key}>{key.replace("_", " ")}<input required={key !== "provenance" && key !== "license"} value={form[key]} onChange={(e) => setForm({ ...form, [key]: e.target.value })} /></label>)}
-      <label><input type="checkbox" checked={form.simulation} onChange={(e) => setForm({ ...form, simulation: e.target.checked })} /> Simulation</label>
-      <button className="primary">Create quarantined release</button>
-    </form>}
-    <label>Transition reason<input value={reason} onChange={(e) => setReason(e.target.value)} /></label>
-    <div className="table">{releases.map((r) => <article className="table-row" key={r.id}>
-      <div><strong>{r.family}</strong><span className="muted">{r.kind} · {r.version}</span></div><span className="status-chip">{r.state}</span>{r.simulation && <span className="tag">SIMULATION</span>}
-      <div className="chips">{r.requested_capabilities.map((c) => <span key={c}>{c}</span>)}</div>
-      {me.role === "admin" && <div className="toolbar">{targets.map((target) => <button type="button" className="button" key={target} onClick={() => transition(r.id, target)}>{target}</button>)}</div>}
-    </article>)}{!releases.length && empty}</div>
-  </section>;
+  const targets = [
+    "verified",
+    "approved",
+    "installed",
+    "active",
+    "draining",
+    "disabled",
+    "revoked",
+  ];
+  return (
+    <section aria-label="Registry">
+      <div className="alert">
+        The registry stores metadata and lifecycle only; it does not upload
+        executables or execute plugins.
+      </div>
+      <div className="toolbar">
+        <div>
+          <h2>Registry</h2>
+          <p className="muted">Release metadata and lifecycle state.</p>
+        </div>
+        <button className="button" onClick={load}>
+          Refresh
+        </button>
+      </div>
+      {me.role === "admin" && (
+        <form
+          className="composer"
+          onSubmit={create}
+          aria-label="Create registry release"
+        >
+          {(
+            [
+              "family",
+              "kind",
+              "version",
+              "digest",
+              "requested_capabilities",
+              "provenance",
+              "license",
+            ] as const
+          ).map((key) => (
+            <label key={key}>
+              {key.replace("_", " ")}
+              <input
+                required={key !== "provenance" && key !== "license"}
+                value={form[key]}
+                onChange={(e) => setForm({ ...form, [key]: e.target.value })}
+              />
+            </label>
+          ))}
+          <label>
+            <input
+              type="checkbox"
+              checked={form.simulation}
+              onChange={(e) =>
+                setForm({ ...form, simulation: e.target.checked })
+              }
+            />{" "}
+            Simulation
+          </label>
+          <button className="primary">Create quarantined release</button>
+        </form>
+      )}
+      <label>
+        Transition reason
+        <input value={reason} onChange={(e) => setReason(e.target.value)} />
+      </label>
+      <div className="table">
+        {releases.map((r) => (
+          <article className="table-row" key={r.id}>
+            <div>
+              <strong>{r.family}</strong>
+              <span className="muted">
+                {r.kind} · {r.version}
+              </span>
+            </div>
+            <span className="status-chip">{r.state}</span>
+            {r.simulation && <span className="tag">SIMULATION</span>}
+            <div className="chips">
+              {r.requested_capabilities.map((c) => (
+                <span key={c}>{c}</span>
+              ))}
+            </div>
+            {me.role === "admin" && (
+              <div className="toolbar">
+                {targets.map((target) => (
+                  <button
+                    type="button"
+                    className="button"
+                    key={target}
+                    onClick={() => transition(r.id, target)}
+                  >
+                    {target}
+                  </button>
+                ))}
+              </div>
+            )}
+          </article>
+        ))}
+        {!releases.length && empty}
+      </div>
+    </section>
+  );
 }
 function Activity({ setError }: { setError: (v: string) => void }) {
   const [events, setEvents] = useState<any[]>([]);
@@ -1201,7 +1560,8 @@ function Activity({ setError }: { setError: (v: string) => void }) {
             <div className="event" key={e.id || i}>
               <strong>{e.event_type || "Event"}</strong>
               <p className="muted">
-                {e.created_at || "Recorded event"} · {e.payload ? JSON.stringify(e.payload) : ""}
+                {e.created_at || "Recorded event"} ·{" "}
+                {e.payload ? JSON.stringify(e.payload) : ""}
               </p>
             </div>
           ))}
@@ -1211,8 +1571,13 @@ function Activity({ setError }: { setError: (v: string) => void }) {
           <h3>Receipts</h3>
           {receipts.map((r, i) => (
             <div className="receipt" key={r.id || i}>
-              <strong>{r.kind || "Receipt"} · {r.outcome_code || "unknown outcome"}</strong>
-              <p className="muted mono">{r.result ? JSON.stringify(r.result) : "No result"} · {r.effect_id || r.id || "No effect"}</p>
+              <strong>
+                {r.kind || "Receipt"} · {r.outcome_code || "unknown outcome"}
+              </strong>
+              <p className="muted mono">
+                {r.result ? JSON.stringify(r.result) : "No result"} ·{" "}
+                {r.effect_id || r.id || "No effect"}
+              </p>
             </div>
           ))}
           {!receipts.length && <p className="muted">No receipts returned.</p>}

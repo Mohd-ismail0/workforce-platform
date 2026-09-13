@@ -202,6 +202,16 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		parts := strings.Split(path, "/")
 		x, e := s.store.ListRecords(ctx, id.OrgID, parts[2])
 		respond(w, x, e)
+	case path == "/runs" && r.Method == "GET":
+		x, e := s.store.ListAgentRuns(ctx, id.OrgID)
+		respond(w, x, e)
+	case strings.HasPrefix(path, "/runs/") && r.Method == "GET":
+		x, e := s.store.GetAgentRun(ctx, id.OrgID, strings.TrimPrefix(path, "/runs/"))
+		if e == nil {
+			jsonWrite(w, 200, x)
+		} else {
+			fail(w, e)
+		}
 	case path == "/proposals" && r.Method == "GET":
 		x, e := s.store.ListProposals(ctx, id.OrgID)
 		respond(w, x, e)
@@ -230,6 +240,25 @@ func (s *Server) routeResource(w http.ResponseWriter, r *http.Request, id platfo
 			x, e := s.store.GetTask(ctx, id.OrgID, tid)
 			if e == nil {
 				jsonWrite(w, 200, x)
+			} else {
+				fail(w, e)
+			}
+			return
+		}
+		if len(p) == 3 && p[2] == "runs" && r.Method == "POST" {
+			var q struct {
+				AgentID string `json:"agent_id"`
+				Intent  string `json:"intent"`
+			}
+			if decode(r, &q) != nil || q.AgentID == "" {
+				failCode(w, 422, "invalid_request", "agent_id is required")
+				return
+			}
+			x, e := s.store.CreateAgentRun(ctx, id.OrgID, tid, id.ID, q.AgentID, q.Intent)
+			if e == nil {
+				jsonWrite(w, 201, x)
+			} else if errors.As(e, &store.ErrNoActiveHarness{}) {
+				failCode(w, 409, "no_active_harness", "an active harness release is required in the registry")
 			} else {
 				fail(w, e)
 			}
