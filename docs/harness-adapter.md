@@ -62,8 +62,11 @@ format as configuration:
 - **Claude Code** — `claude -p --output-format json` prints one envelope object
   `{type, subtype, is_error, result, session_id, total_cost_usd, ...}`; the agent's
   final text is in `result`.
-- **Codex** — `codex exec --json` prints a JSONL event stream; the final message is
-  carried by the last event.
+- **Codex** — documented as a JSONL event stream whose final event carries the
+  message. **The event names used by our test double are synthetic**: they were not
+  taken from a real Codex invocation, and no Codex binary is installed here. The
+  JSONL-handling *mechanism* is tested; compatibility with Codex's actual event
+  schema is unverified and must not be claimed.
 
 Unwrapping accepts the protocol document directly, an envelope wrapping it as an
 object, an envelope wrapping it as a string, and a JSONL stream, up to a bounded
@@ -145,6 +148,48 @@ process boundary, but the model-driven path stays *unverified* until an operator
 Until then, no claim is made that a real agent has run. The simulator remains the
 default runner and no regression to existing behaviour is acceptable.
 
+## Qualification status — what is installed, authenticated, and still blocked
+
+Recorded from real invocations of the pinned binary, not from documentation alone.
+
+| Stage | State | Evidence |
+|---|---|---|
+| Binary installed | **yes** | `@anthropic-ai/claude-code@2.1.270`, platform package `-linux-x64`; the vendor's own `install.cjs` placed the native binary (the npm postinstall was blocked by npm 12's script policy, so the platform package was installed explicitly and the audited placement step run directly) |
+| Executable runs | **yes** | `claude --version` reports the version; it returns real vendor envelopes |
+| Authenticated | **reaches the provider** | a call returns `api_error_status: 400` with `result: "Credit balance is too low"` — a **billing** response, not an authentication failure |
+| Model response verified | **no — blocked on gateway credit** | the unified gateway advertises 24 models including `claude-sonnet-5` and `claude-opus-5`, and rejects calls for want of balance |
+| Platform loop qualified | **mechanism only** | 55/55 through a real process boundary using a deterministic double; no model-backed run yet |
+| Tool-enabled production readiness | **no** | see the isolation section: no kernel containment on this host |
+
+The remaining blocker is an operator spend decision on the gateway the user already
+uses. No credential is scraped from another service, and none is needed from the
+chat: the harness reads `ANTHROPIC_BASE_URL` / `ANTHROPIC_API_KEY` through the
+runner's explicit environment allowlist from a mode-600 operator file.
+
+### The vendor envelope differs from a tidy guess
+
+Captured verbatim from the pinned binary. The notable detail is that a failure does
+**not** arrive with an error-shaped subtype:
+
+```
+type: "result"   subtype: "success"   is_error: true
+terminal_reason: "api_error"          api_error_status: 400
+num_turns: 1     total_cost_usd: 0    result: "Credit balance is too low"
+```
+
+Two consequences, both now enforced in code and tests:
+
+- Only the documented **terminal** field (`result`) is unwrapped. Generic names such as
+  `message`, `text` and `content` are rejected outright: a harness that runs tools emits
+  them constantly, so accepting them risks publishing quoted tool output or an early
+  partial message as the authoritative final answer.
+- A failure anywhere in a stream **invalidates** an earlier apparent success, so a run
+  cannot publish work the harness itself rejected.
+
+A separate base-URL defect was found and fixed the same way: the operator's
+`OPENAI_BASE_URL` already ends in `/v1`, and Claude Code appends its own path, so the
+harness was calling `/v1/v1/messages` and receiving 404. The base is now normalised.
+
 ## Isolation on the current host — measured, not assumed
 
 Real kernel isolation is **unavailable** on the development host as it stands:
@@ -215,9 +260,22 @@ that name. An agent whose harness has no active release is refused; an agent who
 harness this deployment cannot run is refused with a distinct error rather than
 silently falling back to the simulator.
 
-`--permission-mode plan` is deliberate: the harness prepares and proposes, and never
-edits or executes. That mirrors Anthropic's own guidance that the agent prepares
-while a human approves, and the platform — not the agent — decides what becomes real.
+Isolation is layered, and **none of these layers is a sandbox**:
+
+- `--permission-mode plan` is requested so the harness proposes rather than acts. Treat
+  this as a *reduction in what the harness will attempt*, never as proof it cannot
+  invoke a tool. The vendor's own documentation describes plan mode as a permission
+  posture, and permission modes are the harness's own control surface — it is not a
+  kernel boundary, and we do not rely on it as one.
+- The adapter additionally disallows tools explicitly (`--disallowedTools`) and runs
+  `--bare`, so no inherited hooks, plugins, MCP servers or project config are loaded.
+  That is what actually keeps a qualification run from touching anything: the harness
+  is given synthetic context on stdin and no capability to act on it.
+- What the kernel does *not* provide here is measured and documented below (bwrap and
+  unshare are unusable on this host).
+
+For a real model-backed qualification run the guarantee is the union of those two
+controls plus the synthetic task context, not the permission flag alone.
 
 ## Test dependencies
 

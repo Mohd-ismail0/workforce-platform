@@ -149,11 +149,37 @@ if MODE == "claudelike":
     sys.exit(0)
 
 if MODE == "claudeerror":
+    # Shape copied from the real binary: a failure arrives with subtype "success"
+    # and is_error true, with the reason in terminal_reason. Do NOT "tidy" this to
+    # an error-looking subtype -- that is not what the vendor sends, and a fixture
+    # that disagrees with reality makes the parser's correctness coincidental.
     emit({
-        "type": "result", "subtype": "error_during_execution", "is_error": True,
-        "session_id": "session-abc",
-        "result": "authentication failed: internal provider detail that must not surface",
+        "type": "result", "subtype": "success", "is_error": True,
+        "terminal_reason": "api_error", "api_error_status": 400,
+        "session_id": "session-abc", "total_cost_usd": 0, "num_turns": 1,
+        "result": "Credit balance is too low - provider detail that must not surface",
     })
+    sys.exit(0)
+
+if MODE == "genericnoise":
+    # The protocol document appears ONLY inside a generic field. A harness that runs
+    # tools emits message/text/content constantly, so accepting those risks treating
+    # quoted tool output or a partial message as the authoritative answer.
+    emit({
+        "type": "assistant",
+        "message": json.dumps(protocol_doc()),
+        "text": json.dumps(protocol_doc()),
+        "content": json.dumps(protocol_doc()),
+        "result": None,
+    })
+    sys.exit(0)
+
+if MODE == "streamfail":
+    # An early event looks successful; a later one reports failure. The failure must
+    # win, or a run would publish work the harness itself rejected.
+    emit({"type": "progress", "result": json.dumps(protocol_doc())})
+    emit({"type": "result", "is_error": True, "terminal_reason": "api_error",
+          "result": "failed after appearing to succeed"})
     sys.exit(0)
 
 if MODE == "codexlike":

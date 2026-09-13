@@ -225,6 +225,12 @@ _, h_task = call(requester, "POST", "/tasks", {"title": "live real harness run"}
 code, h_agent = call(requester, "POST", "/agents",
                      {"name": "Live CLI Harness Agent", "harness": "test-harness"}, expect=201)
 
+# DEVELOPMENT FIXTURE ONLY, and destructive by design: it revokes harness releases in
+# the fixture organisation so the "no active release" gate can be observed. This is
+# acceptable solely because the target is the throwaway fixture org in a development
+# database. A qualification or production harness must never be revoked by a test, so
+# do not point this script at an organisation holding real releases.
+#
 # This database persists between runs, so a PREVIOUS live check may have left an
 # ACTIVE harness release binding to this runner. Revoke any such binding first, or
 # the "no active release" gate below cannot be observed at all.

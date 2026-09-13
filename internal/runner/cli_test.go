@@ -547,9 +547,17 @@ func TestExtractProtocolShapes(t *testing.T) {
 	if r, err := extractProtocol([]byte(nested)); err != nil || r.Status != StatusWaiting {
 		t.Fatalf("nested string: %v %+v", err, r)
 	}
-	objField := `{"output":{"status":"failed","failure_reason":"x"}}`
+	// The documented TERMINAL field may carry the document as a nested object...
+	objField := `{"type":"result","is_error":false,"result":{"status":"failed","failure_reason":"x"}}`
 	if r, err := extractProtocol([]byte(objField)); err != nil || r.FailureReason != "x" {
-		t.Fatalf("object field: %v %+v", err, r)
+		t.Fatalf("documented terminal field (object form): %v %+v", err, r)
+	}
+	// ...but a GENERIC name must not be unwrapped. A harness that runs tools emits
+	// output/message/text/content constantly, so accepting those risks treating
+	// quoted tool output or an early partial message as the authoritative answer.
+	generic := `{"output":{"status":"failed","failure_reason":"x"}}`
+	if _, err := extractProtocol([]byte(generic)); err == nil {
+		t.Fatal("a protocol document inside a generic field must NOT be accepted")
 	}
 	multi := "{\"type\":\"progress\"}\n" + `{"status":"failed","failure_reason":"last"}`
 	if r, err := extractProtocol([]byte(multi)); err != nil || r.FailureReason != "last" {
@@ -568,5 +576,78 @@ func TestExtractProtocolShapes(t *testing.T) {
 	if _, err := extractProtocol([]byte(deep)); err != nil {
 		// Not finding it is acceptable; hanging or panicking is not.
 		t.Logf("deep nesting resolved as no-protocol: %v", err)
+	}
+}
+
+// TestCLIRunnerRejectsProtocolInGenericFields pins the narrow-unwrapping rule. Only
+// vendor-documented terminal fields may be unwrapped: a harness that runs tools emits
+// message/text/content constantly, so accepting those risks treating quoted tool
+// output or an early partial message as the authoritative final answer.
+func TestCLIRunnerRejectsProtocolInGenericFields(t *testing.T) {
+	r, _ := fakeRunner(t, "genericnoise")
+	res, err := r.Run(context.Background(), sampleRequest())
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if res.Draft != nil {
+		t.Fatal("a protocol document found only in a generic field must NOT be accepted")
+	}
+	if res.Status != StatusFailed || res.FailureReason != FailInvalidOutput {
+		t.Fatalf("got %q/%q, want failed/%s", res.Status, res.FailureReason, FailInvalidOutput)
+	}
+}
+
+// TestCLIRunnerStreamFailureInvalidatesEarlierSuccess: a stream that appears to
+// succeed and then reports an error must not yield the success.
+func TestCLIRunnerStreamFailureInvalidatesEarlierSuccess(t *testing.T) {
+	r, _ := fakeRunner(t, "streamfail")
+	res, err := r.Run(context.Background(), sampleRequest())
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if res.Draft != nil {
+		t.Fatal("a later failure must not be masked by an earlier apparent success")
+	}
+	if res.Status != StatusFailed {
+		t.Fatalf("status = %q, want failed", res.Status)
+	}
+}
+
+// TestExtractProtocolStreamFailureWins pins the ordering rule directly.
+func TestExtractProtocolStreamFailureWins(t *testing.T) {
+	ok := `{"status":"succeeded","summary":"s","operations":[{"integration":"mail","action":"send","business_key":"k","target_id":"t","expected_version":1,"payload":{}}]}`
+	bad := `{"is_error":true,"terminal_reason":"api_error","result":"boom"}`
+	stream := ok + "\n" + bad
+	got, err := extractProtocol([]byte(stream))
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	if got.Status != StatusFailed {
+		t.Fatalf("a later failure must win over an earlier success; got %q", got.Status)
+	}
+	// Order reversed: failure first, then an apparent success. Failure still wins.
+	rev, err := extractProtocol([]byte(bad + "\n" + ok))
+	if err != nil {
+		t.Fatalf("reversed stream: %v", err)
+	}
+	if rev.Status != StatusFailed {
+		t.Fatalf("a failure anywhere in the stream must win; got %q", rev.Status)
+	}
+}
+
+// TestExtractProtocolIgnoresGenericFields pins the field allowlist.
+func TestExtractProtocolIgnoresGenericFields(t *testing.T) {
+	doc := `{"status":"failed","failure_reason":"x"}`
+	for _, field := range []string{"message", "text", "content", "output", "last_message"} {
+		wrapped := `{"type":"assistant","` + field + `":` + strconv.Quote(doc) + `}`
+		if _, err := extractProtocol([]byte(wrapped)); err == nil {
+			t.Fatalf("field %q must not be unwrapped as the authoritative answer", field)
+		}
+	}
+	// The documented terminal field IS unwrapped.
+	ok := `{"type":"result","subtype":"success","is_error":false,"result":` + strconv.Quote(doc) + `}`
+	got, err := extractProtocol([]byte(ok))
+	if err != nil || got.FailureReason != "x" {
+		t.Fatalf("documented terminal field must be unwrapped: %v %+v", err, got)
 	}
 }

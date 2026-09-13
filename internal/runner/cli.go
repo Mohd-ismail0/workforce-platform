@@ -563,10 +563,22 @@ func nonNilRecords(in []RecordRef) []RecordRef {
 // business-key reservation, endorsement and approval.
 // ---------------------------------------------------------------------------
 
-// envelopeKeys are the field names harnesses use to carry the final agent message.
-var envelopeKeys = []string{"result", "output", "message", "text", "content", "last_message"}
+// envelopeKeys are the ONLY envelope fields unwrapped, and they must be
+// vendor-documented TERMINAL fields.
+//
+// Deliberately not included: "message", "text", "content", "output". Those names are
+// generic enough that a tool result or an early partial assistant message could be
+// mistaken for the authoritative final answer — and a harness that runs tools emits
+// plenty of both. For Claude Code, `-p --output-format json` documents a single
+// envelope whose "result" carries the final text; that is the field this adapter
+// relies on, verified against the real binary rather than assumed.
+var envelopeKeys = []string{"result"}
 
 const maxUnwrapDepth = 3
+
+// newlineByte is the LF byte used to split a JSONL event stream. Named rather
+// than escaped inline because an embedded escape previously broke the build.
+var newlineByte = []byte{10}
 
 // extractProtocol reads our protocol document out of harness stdout, tolerating a
 // JSON envelope (Claude Code) and a JSONL event stream (Codex).
@@ -578,18 +590,30 @@ func extractProtocol(raw []byte) (cliReply, error) {
 	if r, ok := tryDecode(trimmed, 0); ok {
 		return r, nil
 	}
-	// JSONL: an event stream's final interesting event carries the result. Keep the
-	// LAST success so a trailing summary event wins over earlier progress events.
+	// JSONL: an event stream carries progress events and then a terminal result.
+	// A FAILURE ANYWHERE in the stream wins outright: a stream that appears to
+	// succeed and then reports an error must not yield the success, because that
+	// would let a run publish work the harness itself rejected.
 	var last cliReply
 	found := false
-	for _, line := range bytes.Split(trimmed, []byte("\n")) {
+	failed := false
+	for _, line := range bytes.Split(trimmed, newlineByte) {
 		line = bytes.TrimSpace(line)
 		if len(line) == 0 || line[0] != '{' {
 			continue
 		}
-		if r, ok := tryDecode(line, 0); ok {
-			last, found = r, true
+		r, ok := tryDecode(line, 0)
+		if !ok {
+			continue
 		}
+		if r.Status == StatusFailed {
+			last, found, failed = r, true, true
+			continue
+		}
+		if failed {
+			continue
+		}
+		last, found = r, true
 	}
 	if found {
 		return last, nil
