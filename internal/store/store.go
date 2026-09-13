@@ -682,8 +682,24 @@ func (s *Store) RunWorker(ctx context.Context, reg *connectors.Registry) error {
 	if err = client.Start(ctx); err != nil {
 		return err
 	}
+
+	// Recovery must be SCHEDULED, not merely permitted. An expired lease only makes a
+	// run eligible; the job that could have picked it up has already been consumed, so
+	// without this a worker that dies mid-run strands the run forever. Real harnesses
+	// run for minutes, which makes that window wide.
+	//
+	// The sweeper observes ctx, so cancellation unwinds it, and the explicit wait below
+	// ensures no goroutine outlives the worker.
+	sweepDone := make(chan struct{})
+	go func() {
+		defer close(sweepDone)
+		s.sweepExpiredRuns(ctx)
+	}()
+
 	<-ctx.Done()
-	return client.Stop(context.Background())
+	err = client.Stop(context.Background())
+	<-sweepDone
+	return err
 }
 
 func (s *Store) executeProposal(ctx context.Context, reg *connectors.Registry, org, pid string) error {

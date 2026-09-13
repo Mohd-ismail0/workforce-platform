@@ -145,6 +145,39 @@ process boundary, but the model-driven path stays *unverified* until an operator
 Until then, no claim is made that a real agent has run. The simulator remains the
 default runner and no regression to existing behaviour is acceptable.
 
+## Isolation on the current host — measured, not assumed
+
+Real kernel isolation is **unavailable** on the development host as it stands:
+
+```
+$ bwrap --version                       # bubblewrap 0.9.0 is installed
+$ bwrap --ro-bind /usr /usr ... -- python3 -c 'print("ok")'
+bwrap: setting up uid map: Permission denied      # exit 1
+$ id -u ; sudo -n true
+1000                                              # unprivileged
+sudo: a password is required                      # cannot escalate
+```
+
+`kernel.unprivileged_userns_clone` is `1`, but creating the UID map inside the user
+namespace is denied (the usual AppArmor restriction on unprivileged user namespaces).
+The same mechanism backs `unshare -U`, so that route is closed too, and
+`systemd-run` would need privileges to place the run in a sandbox of its own.
+
+Two consequences, both deliberate:
+
+1. The `isolation_required` gate is the correct behaviour, not a placeholder. A
+   configured harness refuses to launch until an operator explicitly accepts that it
+   runs unsandboxed as this account — so the risky mode is a chosen one.
+2. Nothing here should be described as containment. Until an operator provides an
+   execution identity or kernel isolation (a dedicated unprivileged UID with a
+   read-only root and an egress allowlist is the smallest useful step), harness runs
+   are acceptable only for harnesses already trusted to read this host.
+
+To enable the gate on this host, an operator with privileges would need to permit
+unprivileged user namespaces for the runner binary (or provide an equivalent sandbox),
+then set `WORKFORCE_RUNNER_ALLOW_UNISOLATED` only if they accept the unsandboxed
+trade-off instead.
+
 ## Operator setup
 
 Configure runners entirely through the environment — no code change, no compiled-in
