@@ -8,6 +8,9 @@ import {
   getToken,
   list,
   listHandoffs,
+  listRegistryReleases,
+  createRegistryRelease,
+  transitionRegistryRelease,
   Me,
   Operation,
   operationPayload,
@@ -26,6 +29,7 @@ const nav = [
   "Agents",
   "Activity & receipts",
   "Handoffs",
+  "Registry",
 ];
 const statuses = [
   "draft",
@@ -232,7 +236,7 @@ function Shell({
               onClick={() => setPage(n)}
             >
               <span className="nav-icon">
-                {["⌂", "▦", "✓", "◈", "◎", "≋", "⇄"][i]}
+                {["⌂", "▦", "✓", "◈", "◎", "≋", "⇄", "◇"][i]}
               </span>
               {n}
             </button>
@@ -283,6 +287,7 @@ function Page({
   if (page === "Agents") return <Agents setError={setError} />;
   if (page === "Activity & receipts") return <Activity setError={setError} />;
   if (page === "Handoffs") return <Handoffs me={me} setError={setError} />;
+  if (page === "Registry") return <Registry me={me} setError={setError} />;
   return <Overview me={me} setError={setError} />;
 }
 export function Handoffs({ me, setError }: { me: Me; setError: (v: string) => void }) {
@@ -524,6 +529,7 @@ export function TaskDetail({
   const [parent, setParent] = useState("");
   const [proposal, setProposal] = useState(false);
   const [summary, setSummary] = useState("");
+  const [businessKey, setBusinessKey] = useState("");
   const [integration, setIntegration] =
     useState<Operation["integration"]>("inventory");
   const [action, setAction] = useState<Operation["action"]>("adjust");
@@ -578,6 +584,7 @@ export function TaskDetail({
           summary,
           operations: [
             {
+              business_key: businessKey,
               integration,
               action,
               target_id: target,
@@ -639,6 +646,11 @@ export function TaskDetail({
               />
             </label>
             <label>
+              Business operation key
+              <input aria-label="Business operation key" required value={businessKey} onChange={(e) => setBusinessKey(e.target.value)} />
+              <small className="muted">The same key prevents duplicate official effects across retries and re-runs.</small>
+            </label>
+            <label>
               Integration
               <select
                 value={integration}
@@ -666,6 +678,7 @@ export function TaskDetail({
             <label>
               Target ID
               <input
+                aria-label="Target ID"
                 required
                 value={target}
                 onChange={(e) => setTarget(e.target.value)}
@@ -952,6 +965,8 @@ function OperationPreview({ op }: { op: Operation }) {
         <code>{op.target_id}</code>
         <span className="label">EXPECTED VERSION</span>
         <code>v{op.expected_version}</code>
+        <span className="label">BUSINESS KEY</span>
+        <code>{op.business_key}</code>
       </div>
       <dl className="typed-fields">
         {Object.entries(op.payload).map(([k, v]) => (
@@ -1129,6 +1144,39 @@ function Agents({ setError }: { setError: (v: string) => void }) {
       </div>
     </>
   );
+}
+export function Registry({ me, setError }: { me: Me; setError: (v: string) => void }) {
+  const [releases, setReleases] = useState<import("./api").RegistryRelease[]>([]);
+  const [reason, setReason] = useState("");
+  const [form, setForm] = useState({ family: "", kind: "", version: "", digest: "", requested_capabilities: "", simulation: false, provenance: "", license: "" });
+  const load = () => listRegistryReleases().then(setReleases).catch((e) => setError(e.message));
+  useEffect(() => { load(); }, []);
+  const transition = async (id: string, state: string) => {
+    try { await transitionRegistryRelease(id, { state, reason }); setReason(""); load(); } catch (e) { setError((e as Error).message); }
+  };
+  const create = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      const created = await createRegistryRelease({ ...form, requested_capabilities: form.requested_capabilities.split(",").map((x) => x.trim()).filter(Boolean), state: "quarantined" });
+      setReleases((items) => [...items, created]);
+    } catch (e) { setError((e as Error).message); }
+  };
+  const targets = ["verified", "approved", "installed", "active", "draining", "disabled", "revoked"];
+  return <section aria-label="Registry">
+    <div className="alert">The registry stores metadata and lifecycle only; it does not upload executables or execute plugins.</div>
+    <div className="toolbar"><div><h2>Registry</h2><p className="muted">Release metadata and lifecycle state.</p></div><button className="button" onClick={load}>Refresh</button></div>
+    {me.role === "admin" && <form className="composer" onSubmit={create} aria-label="Create registry release">
+      {(["family", "kind", "version", "digest", "requested_capabilities", "provenance", "license"] as const).map((key) => <label key={key}>{key.replace("_", " ")}<input required={key !== "provenance" && key !== "license"} value={form[key]} onChange={(e) => setForm({ ...form, [key]: e.target.value })} /></label>)}
+      <label><input type="checkbox" checked={form.simulation} onChange={(e) => setForm({ ...form, simulation: e.target.checked })} /> Simulation</label>
+      <button className="primary">Create quarantined release</button>
+    </form>}
+    <label>Transition reason<input value={reason} onChange={(e) => setReason(e.target.value)} /></label>
+    <div className="table">{releases.map((r) => <article className="table-row" key={r.id}>
+      <div><strong>{r.family}</strong><span className="muted">{r.kind} · {r.version}</span></div><span className="status-chip">{r.state}</span>{r.simulation && <span className="tag">SIMULATION</span>}
+      <div className="chips">{r.requested_capabilities.map((c) => <span key={c}>{c}</span>)}</div>
+      {me.role === "admin" && <div className="toolbar">{targets.map((target) => <button type="button" className="button" key={target} onClick={() => transition(r.id, target)}>{target}</button>)}</div>}
+    </article>)}{!releases.length && empty}</div>
+  </section>;
 }
 function Activity({ setError }: { setError: (v: string) => void }) {
   const [events, setEvents] = useState<any[]>([]);

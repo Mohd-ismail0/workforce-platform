@@ -44,15 +44,23 @@ func reserveBusinessOperations(ctx context.Context, tx pgx.Tx, org, proposal str
 			if oldFP != fp {
 				return fmt.Errorf("business operation already reserved for this key with different content: %s", id)
 			}
+			// A business key protects one official operation. It may move forward only
+			// within the SAME task's revision lineage (a deliberate new revision supersedes
+			// the previous one) or after the previous holder was rejected. Reuse across
+			// tasks, or after an approval/dispatch, requires explicit human resolution.
+			var newTask string
+			if err := tx.QueryRow(ctx, `SELECT task_id FROM proposals WHERE org_id=$1 AND id=$2`, org, proposal).Scan(&newTask); err != nil {
+				return err
+			}
 			rebindable := oldStatus == "released"
-			if oldStatus == "reserved" && oldProposal != "" {
-				var oldProposalStatus string
-				if e := tx.QueryRow(ctx, `SELECT status FROM proposals WHERE org_id=$1 AND id=$2`, org, oldProposal).Scan(&oldProposalStatus); e == nil && (oldProposalStatus == "rejected" || oldProposalStatus == "superseded") {
-					rebindable = true
+			if !rebindable && oldStatus == "reserved" && oldProposal != "" {
+				var oldProposalStatus, oldProposalTask string
+				if e := tx.QueryRow(ctx, `SELECT status,task_id FROM proposals WHERE org_id=$1 AND id=$2`, org, oldProposal).Scan(&oldProposalStatus, &oldProposalTask); e == nil {
+					rebindable = oldProposalStatus == "rejected" || (oldProposalStatus == "superseded" && oldProposalTask == newTask)
 				}
 			}
 			if !rebindable {
-				return fmt.Errorf("business operation already dispatched: %s", id)
+				return fmt.Errorf("business operation already claimed by another task or dispatched: %s", id)
 			}
 			_, err = tx.Exec(ctx, `UPDATE business_operations SET proposal_id=$1,status='reserved',fingerprint=$2,updated_at=clock_timestamp() WHERE org_id=$3 AND id=$4`, proposal, fp, org, id)
 		}

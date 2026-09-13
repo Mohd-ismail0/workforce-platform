@@ -797,7 +797,7 @@ func Seed(ctx context.Context, s *Store) error {
 			if _, e := tx.Exec(ctx, "select set_config('app.org_id',$1,true)", o.id); e != nil {
 				return e
 			}
-			for _, p := range []struct{ id, name, role string }{{o.id + "-requester", "Fixture Requester", "requester"}, {o.id + "-approver", "Fixture Approver", "approver"}} {
+			for _, p := range []struct{ id, name, role string }{{o.id + "-requester", "Fixture Requester", "requester"}, {o.id + "-approver", "Fixture Approver", "approver"}, {o.id + "-admin", "Fixture Operator", "admin"}} {
 				if _, e := tx.Exec(ctx, "insert into principals(id,org_id,name,role) values($1,$2,$3,$4) on conflict (id) do update set role=excluded.role", p.id, o.id, p.name, p.role); e != nil {
 					return e
 				}

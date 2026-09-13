@@ -105,6 +105,64 @@ func TestEffectLinksBusinessOperation(t *testing.T) {
 		t.Fatalf("linked=%d status=%s", linked, st)
 	}
 }
+func TestKeyMovesWithinTaskButNotAcrossTasks(t *testing.T) {
+	s, o, r, a := fixture(t)
+	ctx := context.Background()
+	key := "regress:lineage:1"
+	target := seedInventory(t, s, o)
+	first := task(t, s, o, r)
+
+	rev1, e := s.CreateProposal(ctx, o, first.ID, r, "first", []connectors.Operation{opForTest(t, target, key, 1)})
+	if e != nil {
+		t.Fatal(e)
+	}
+	// Same task, same intent, deliberately re-prepared: a new revision takes the key.
+	rev2, e := s.CreateProposal(ctx, o, first.ID, r, "corrected", []connectors.Operation{opForTest(t, target, key, 1)})
+	if e != nil {
+		t.Fatalf("revision within the same task must be allowed: %v", e)
+	}
+	if rev2.Revision != 2 {
+		t.Fatalf("expected revision 2, got %d", rev2.Revision)
+	}
+	old, e := s.GetProposal(ctx, o, rev1.ID)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if old.Status != "superseded" {
+		t.Fatalf("previous revision should be superseded, got %s", old.Status)
+	}
+	// Exactly one reservation exists for the key, held by the live revision.
+	var holder string
+	var count int
+	if e := s.WithOrg(ctx, o, func(tx pgx.Tx) error {
+		if e := tx.QueryRow(ctx, "SELECT count(*) FROM business_operations WHERE org_id=$1 AND business_key=$2", o, key).Scan(&count); e != nil {
+			return e
+		}
+		return tx.QueryRow(ctx, "SELECT coalesce(proposal_id,'') FROM business_operations WHERE org_id=$1 AND business_key=$2", o, key).Scan(&holder)
+	}); e != nil {
+		t.Fatal(e)
+	}
+	if count != 1 || holder != rev2.ID {
+		t.Fatalf("reservation not moved cleanly: count=%d holder=%s want=%s", count, holder, rev2.ID)
+	}
+	// A different task claiming the same official operation is refused.
+	second := task(t, s, o, r)
+	if _, e := s.CreateProposal(ctx, o, second.ID, r, "other task", []connectors.Operation{opForTest(t, target, key, 1)}); e == nil {
+		t.Fatal("cross-task reuse of a business key was accepted")
+	}
+	// The live revision remains fully actionable afterwards.
+	if e := s.Decide(ctx, o, rev2.ID, r, "requester", "endorse", rev2.Revision, rev2.Digest, ""); e != nil {
+		t.Fatalf("live revision unusable after a refused cross-task claim: %v", e)
+	}
+	if e := s.Decide(ctx, o, rev2.ID, a, "approver", "approve", rev2.Revision, rev2.Digest, ""); e != nil {
+		t.Fatalf("approval after refused claim failed: %v", e)
+	}
+	// Once dispatched, the key is spent even within the task.
+	if _, e := s.CreateProposal(ctx, o, first.ID, r, "after approval", []connectors.Operation{opForTest(t, target, key, 1)}); e == nil {
+		t.Fatal("spent business key was reused after approval")
+	}
+}
+
 func TestInvalidBusinessKeyRejected(t *testing.T) {
 	s, o, r, _ := fixture(t)
 	ctx := context.Background()

@@ -14,12 +14,39 @@ export type Task = {
 };
 export type Operation = {
   id?: string;
+  business_key: string;
   integration: "inventory" | "mail" | "documents";
   action: "adjust" | "send" | "update";
   target_id: string;
   expected_version: number;
   payload: Record<string, unknown>;
 };
+export type RegistryRelease = {
+  id: string;
+  family: string;
+  kind: string;
+  version: string;
+  digest: string;
+  state: string;
+  requested_capabilities: string[];
+  granted_capabilities: string[];
+  compatibility: unknown;
+  simulation: boolean;
+  provenance: unknown;
+  license: string;
+  created_by: string;
+  version_num?: number;
+};
+
+export const listRegistryReleases = async () => {
+  const body = await api<{ items?: RegistryRelease[] } | RegistryRelease[]>("/registry/releases");
+  return Array.isArray(body) ? body : body.items || [];
+};
+export const createRegistryRelease = (body: Record<string, unknown>) =>
+  api<RegistryRelease>("/registry/releases", { method: "POST", body: JSON.stringify(body) });
+export const transitionRegistryRelease = (id: string, body: Record<string, unknown>) =>
+  api<RegistryRelease>(`/registry/releases/${id}/transition`, { method: "POST", body: JSON.stringify(body) });
+
 export type Proposal = {
   id: string;
   task_id: string;
