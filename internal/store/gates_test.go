@@ -414,8 +414,11 @@ func TestLiveLeaseIsNotStolen(t *testing.T) {
 		t.Fatal(e)
 	}
 
-	if e := s.ExecuteAgentRun(ctx, org, run.ID); e != nil {
-		t.Fatalf("a live lease must not surface an error: %v", e)
+	// A live lease must not be stolen, AND must not be acknowledged as done: if this
+	// delivery reported success it would be marked complete in the queue, consuming
+	// the only job that could recover the run should the holder die.
+	if e := s.ExecuteAgentRun(ctx, org, run.ID); e == nil {
+		t.Fatal("a delivery for a live-leased run must ask to be retried, not report success")
 	}
 	if n := countProposals(t, s, org, tk.ID); n != 0 {
 		t.Fatalf("a live lease must not be stolen, but %d proposals were published", n)

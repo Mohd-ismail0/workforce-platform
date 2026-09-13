@@ -55,7 +55,19 @@ existing validation rejects it. A harness that wants authorisation asks for it w
 
 ## Execution boundary
 
-Not a subprocess under our own privileged user in a different directory.
+**This is reduced exposure, NOT a sandbox.** The harness runs as the same unprivileged
+account as the platform, so it can see what that account can see and reach the network
+that account can reach. What the adapter removes is the *easy* paths: no inherited
+developer environment, no SSH agent, no git credentials, no database URL, a disposable
+scratch HOME, a fresh writable directory per run, no shell, and a hard time/output
+budget. It does **not** provide filesystem mount isolation, a separate UID, seccomp
+confinement or network egress control.
+
+Runs are therefore only acceptable for harnesses the operator already trusts to read
+this host. Kernel-level isolation (separate unprivileged UID/namespace, read-only
+root, egress allowlist) is a prerequisite before running harnesses that are not
+operated by the same team — and before any run against data whose exposure would
+matter.
 
 - Operator-configured executable + fixed argv. Never a shell string assembled from
   task data or a registry manifest. No `sh -c` over user input.

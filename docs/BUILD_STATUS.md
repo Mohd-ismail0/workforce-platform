@@ -40,7 +40,8 @@ This is a partial working platform foundation, not completion of the full build 
 - Harness output is untrusted input: it is validated again by `CreateProposal`, business-key reservation, endorsement and distinct approval. A harness cannot approve, execute or hold business credentials, and an approval never releases credentials to it.
 - A successful harness run means *preparation completed*, not business completion. The run is labelled as preparing a proposal; the effect happens only after human approval through the existing executor.
 - Recovery is eligibility, not scheduling: an expired claim becomes reclaimable, but no scheduler is guaranteed to retry it. The lease is now derived from the runner's own timeout budget (+60s, 2-minute floor) so a slow-but-healthy harness cannot outlive its lease.
-- Test suites share one database and River queue; isolation is achieved by running packages serially (`-p 1`), not by separate databases per suite.
+- Test suites share one database and one River queue; isolation is achieved by running packages serially (`-p 1`). Within `internal/api`, several tests start real workers on that shared queue, so a run may legitimately be claimed mid-test. Guarantees about *not being claimed* are therefore asserted in `internal/store`, which drives the store directly with no worker present; `internal/api` asserts only what holds regardless of scheduling (no publication bypasses human review).
+- Per-suite isolated databases/queues are the proper follow-up and are not yet implemented.
 
 ## Evidence
 

@@ -162,7 +162,26 @@ func (s *Store) ExecuteAgentRun(ctx context.Context, org, id string) error {
 		return tx.QueryRow(ctx, "update agent_runs set status='running',attempt=attempt+1,claim_token=$3,claim_expires_at=clock_timestamp()+($4::bigint * interval '1 second'),started_at=coalesce(started_at,clock_timestamp()) where org_id=$1 and id=$2 and (status='queued' or (status='running' and (claim_expires_at is null or claim_expires_at < clock_timestamp()))) returning task_id,agent_id,harness,intent,created_by,coalesce(harness_release_id,''),runner_id,attempt", org, id, tok, leaseSeconds).Scan(&task, &aid, &h, &intent, &initiator, &release, &runnerID, &attempt)
 	})
 	if errors.Is(e, pgx.ErrNoRows) {
-		return nil
+		// Nothing was claimable. Decide carefully whether this delivery is DONE or
+		// merely EARLY: reporting success for a run that is still in flight marks the
+		// job complete in the queue, consuming the only delivery that could recover
+		// the run if the current holder dies. Real harnesses run for minutes, so that
+		// window is wide.
+		var st string
+		if qe := s.WithOrg(ctx, org, func(tx pgx.Tx) error {
+			return tx.QueryRow(ctx, "select status from agent_runs where org_id=$1 and id=$2", org, id).Scan(&st)
+		}); qe != nil {
+			return qe
+		}
+		switch st {
+		case "running":
+			// Held by a live lease: ask to be retried rather than acknowledged.
+			return errors.New("run is held by a live lease; retrying later")
+		default:
+			// Terminal (succeeded/failed/cancelled) or parked awaiting an answer
+			// (which enqueues its own fresh continuation): nothing left to do here.
+			return nil
+		}
 	}
 	if e != nil {
 		return e
