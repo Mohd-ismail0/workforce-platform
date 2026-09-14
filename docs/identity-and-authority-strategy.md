@@ -138,9 +138,9 @@ Two consequences that decide the unbuilt session work:
 3. Identity linking + `AUTH_MODE=oidc` bearer path — **done** (`011_identity_links`,
    `identity_links` + `oidc_identity.go`, wired through `Server.auth`). Verified by unit
    tests; no live Logto token has been verified yet, because there is no credential.
-4. Login/callback/session/cookies/CSRF — **not started.** The browser flow is the
-   remaining half of identity; today `oidc` mode serves API clients that present a
-   token.
+4. Login/callback/session/cookies/CSRF — **implemented and tested** in the BFF foundation
+   (`012_bff_sessions`, `oauth.go`, `bff.go`). The browser flow is still not live against
+   Logto: provisioning, a real token exchange and a real human login remain unverified.
 5. Human-approved first real integration — not started.
 
 ## Corrections to earlier claims

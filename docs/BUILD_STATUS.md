@@ -78,9 +78,11 @@ Verified by execution, not assertion:
 - No live Logto token has ever been verified. The verifier is proven hermetically only.
 - Provisioning has **not** been applied. No Management API credential was found in the
   locations searched (that is "not found", not "does not exist").
-- The interactive browser flow is not implemented: no authorization-code login, callback,
-  server-side sessions, cookies or CSRF. `AUTH_MODE=oidc` today verifies a **bearer token**
-  and requires a pre-existing explicit link; without one it refuses every request.
+- The BFF browser foundation is implemented and tested: authorization-code + PKCE,
+  single-use state/nonce transactions, hashed server-side sessions, revocation,
+  offboarding checks, HttpOnly/Secure/SameSite cookies and CSRF protection. Migration 012
+  applies repeatably. No live Logto exchange or human browser login has been exercised yet.
+  `AUTH_MODE=oidc` still requires an explicit principal link; without one it refuses access.
 - Authentication is not authorization. Org, role, ownership, approval jurisdiction and
   separation of duties come from kernel rows, never from a token claim. A token proves
   *who*, never *what*.
