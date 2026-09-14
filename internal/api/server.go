@@ -1,11 +1,14 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"net/http"
 	"strings"
+	"time"
 	"workforce.local/platform/internal/connectors"
 	"workforce.local/platform/internal/platform"
 	"workforce.local/platform/internal/store"
@@ -19,13 +22,35 @@ type Server struct {
 	// verifier performs no network I/O until the first token arrives, so startup does
 	// not depend on the issuer being reachable.
 	oidc *platform.OIDCVerifier
+	// bff drives the interactive browser login. It is non-nil ONLY when the browser flow
+	// is actually configured, so its absence can never be mistaken for a permissive mode:
+	// every /auth route refuses when it is nil.
+	bff *bff
 }
 
 func New(c platform.Config, st *store.Store) *Server {
-	s := &Server{c, st, connectors.NewRegistry(), nil}
+	s := &Server{cfg: c, store: st, registry: connectors.NewRegistry()}
 	if c.AuthMode == "oidc" {
 		if v, err := platform.NewOIDCVerifier(c.OIDC); err == nil {
 			s.oidc = v
+		}
+		// Discovery is performed here, so a misconfigured issuer or client fails at
+		// startup rather than on a colleague's first login attempt. A failure is logged
+		// and the browser routes stay disabled instead of booting half-configured.
+		if c.Browser.Enabled() {
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			oc, err := platform.NewOAuthClient(ctx, c.Browser.OAuth(c.OIDC.Issuer))
+			if err != nil {
+				log.Printf("browser login is DISABLED: %v", err)
+			} else {
+				s.bff = &bff{
+					oauth:         oc,
+					store:         st,
+					secureCookies: c.Browser.CookieSecure,
+					postLogoutURL: c.Browser.PostLogoutURL,
+				}
+			}
 		}
 	}
 	return s
@@ -44,6 +69,11 @@ func (s *Server) Handler() http.Handler {
 		}
 		jsonWrite(w, 200, map[string]string{"status": "ready"})
 	})
+	// Browser (BFF) routes. Each refuses when the flow is not configured.
+	m.HandleFunc("/auth/login", s.handleLogin)
+	m.HandleFunc("/auth/callback", s.handleCallback)
+	m.HandleFunc("/auth/logout", s.handleLogout)
+	m.HandleFunc("/auth/session", s.handleSession)
 	m.HandleFunc("/api/v1/", s.api)
 	return m
 }
@@ -105,11 +135,19 @@ func decode(r *http.Request, v any) error {
 	return nil
 }
 func (s *Server) api(w http.ResponseWriter, r *http.Request) {
-	id, e := s.auth(r)
+	id, sess, viaCookie, e := s.authorize(r)
 	if e != nil {
 		// Deliberately generic: telling a caller whether a token was malformed, expired,
 		// unlinked or revoked turns the endpoint into a probe oracle.
 		failCode(w, 401, "unauthenticated", "authentication failed")
+		return
+	}
+	// A browser attaches the session cookie automatically, including to a request the user
+	// did not intend to make. A state-changing request authenticated that way must
+	// therefore carry the synchroniser token as proof it was deliberate. A bearer token
+	// needs no such proof, because the browser never attaches one by itself.
+	if viaCookie && stateChanging(r.Method) && !s.csrfOK(r, sess.CSRFToken) {
+		failCode(w, 403, "csrf_failed", "request could not be verified as deliberate")
 		return
 	}
 	path := strings.TrimPrefix(r.URL.Path, "/api/v1")

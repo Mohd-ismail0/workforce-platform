@@ -3,6 +3,7 @@ package platform
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
@@ -41,6 +42,16 @@ type OIDCConfig struct {
 	// AllowInsecureIssuer permits a plain-http issuer. Only for hermetic tests against
 	// a loopback issuer; it is refused for any other host.
 	AllowInsecureIssuer bool
+	// AllowedAlgs overrides the signing-algorithm allowlist. Empty means the default
+	// (ES384).
+	//
+	// IMPORTANT LIMIT, stated because it is easy to over-trust: OIDC discovery's
+	// `id_token_signing_alg_values_supported` describes ID tokens ONLY. This deployment
+	// advertises ES384 there, which is why ES384 is the default -- but nothing in
+	// discovery says how ACCESS tokens are signed, and those are what the bearer path
+	// verifies. If the instance ever signs access tokens differently, the bearer path
+	// rejects every valid token, so this is overridable rather than hardcoded.
+	AllowedAlgs []string
 }
 
 // Claims is the verified subset we consume. Everything else is ignored rather than
@@ -55,9 +66,43 @@ type Claims struct {
 	Email    string
 }
 
-// allowedAlgs is the signing-algorithm allowlist. It is OUR list, never the token's —
-// accepting whatever the token advertises is the classic "alg" substitution hole.
-var allowedAlgs = []string{"ES384"}
+// defaultAlgs is the signing-algorithm allowlist used when none is configured. It is OUR
+// list, never the token's — accepting whatever the token advertises is the classic "alg"
+// substitution hole. ES384 is the default because that is what this deployment advertises
+// for ID tokens; see OIDCConfig.AllowedAlgs for the limit of that derivation.
+var defaultAlgs = []string{"ES384"}
+
+// algs returns the configured allowlist, or the default.
+func (c OIDCConfig) algs() []string {
+	if len(c.AllowedAlgs) == 0 {
+		return append([]string(nil), defaultAlgs...)
+	}
+	return append([]string(nil), c.AllowedAlgs...)
+}
+
+// knownAlgs are the algorithms we are willing to pin, so a typo in configuration cannot
+// silently widen or break verification.
+var knownAlgs = map[string]bool{
+	"ES256": true, "ES384": true, "ES512": true,
+	"RS256": true, "RS384": true, "RS512": true,
+	"PS256": true, "PS384": true, "PS512": true,
+	"EdDSA": true,
+}
+
+// ValidateAlgs rejects an unknown or empty algorithm name. "none" and the HMAC family are
+// never acceptable: "none" is no signature at all, and HS* would mean the verification key
+// is a shared secret the issuer could not have used to sign a public token.
+func ValidateAlgs(algs []string) error {
+	if len(algs) == 0 {
+		return nil
+	}
+	for _, a := range algs {
+		if !knownAlgs[a] {
+			return fmt.Errorf("unsupported signing algorithm %q", a)
+		}
+	}
+	return nil
+}
 
 type OIDCVerifier struct {
 	cfg OIDCConfig
@@ -92,6 +137,9 @@ func NewOIDCVerifier(cfg OIDCConfig) (*OIDCVerifier, error) {
 		cfg.MaxTokenAge = time.Hour
 	}
 	if err := checkIssuerScheme(cfg.Issuer, cfg.AllowInsecureIssuer); err != nil {
+		return nil, err
+	}
+	if err := ValidateAlgs(cfg.AllowedAlgs); err != nil {
 		return nil, err
 	}
 	return &OIDCVerifier{cfg: cfg}, nil
@@ -139,7 +187,7 @@ func (o *OIDCVerifier) verifier(ctx context.Context) (*oidc.IDTokenVerifier, err
 		// here even though its signature is valid.
 		ClientID: o.cfg.Audience,
 		// Pinned allowlist; anything else in the token header is refused.
-		SupportedSigningAlgs: append([]string(nil), allowedAlgs...),
+		SupportedSigningAlgs: o.cfg.algs(),
 	})
 	return o.v, nil
 }
