@@ -5,7 +5,8 @@ Established by reading the **deployed** instance rather than prose docs:
 | Fact | Source |
 |---|---|
 | Issuer `https://auth.xsama.org/oidc` (ES384, PKCE S256) | `/.well-known/openid-configuration` → 200 |
-| Management API under `<endpoint>/api`, OAuth2 client_credentials at `/oidc/token`, scope `all` | `/api/swagger.json` → 200 (openapi 3.0.1, 240 paths) |
+| Management API is served under the `/api` **path**, OAuth2 client_credentials at `/oidc/token`, scope `all` | `/api/swagger.json` → 200 (openapi 3.0.1, 240 paths) |
+| The **audience** used to authenticate is a different value — see the edition table below | Logto "Interact with Management API" |
 | `GET /api/resources` omits scopes unless `includeScopes=true` | spec parameter list |
 | `POST /api/applications` type enum includes `Traditional` (confidential) | spec schema |
 | `PATCH`/`GET` use `/api/applications/{id}` — **not** `{applicationId}` | spec path list |
@@ -36,20 +37,24 @@ LOGTO_MANAGEMENT_CLIENT_SECRET=<secret>
 LOGTO_MANAGEMENT_RESOURCE=<the Management API indicator>
 ```
 
-**On that fourth line — this is the one genuinely ambiguous value.** The Management API
-indicator is *not* the issuer URL, and the two candidates are:
+**On that fourth line — the value that is easy to get backwards.** The Management API
+indicator is *not* the issuer URL. Logto's "Interact with Management API" documentation
+states it differs by edition:
 
 | Deployment | Indicator |
 |---|---|
-| self-hosted (this instance) | `<endpoint>/api` |
-| Logto Cloud | `https://default.logto.app/api` |
+| self-hosted / OSS (**this instance**) | `https://default.logto.app/api` |
+| Logto Cloud | `https://[tenant-id].logto.app/api` |
 
-This instance's own spec documents the `resource=<endpoint>/api` form, so the script
-**derives** `https://auth.xsama.org/api` when the variable is unset and prints a NOTE. It
-does not require the variable, because the derivation is the right answer for a
-self-hosted instance — but it names both candidates in the failure path, since getting
-this wrong fails *identically to a bad secret*. Then: `python3 scripts/logto_provision.py`
-(dry run) → `--apply` → run again, which must report *nothing to do*.
+This was got wrong twice before being settled from that page: the deployed instance's
+OpenAPI document contains a worked **Cloud** curl example (`resource=<endpoint>/api`),
+which is not the self-hosted form, so reasoning from it produces the Cloud answer for a
+self-hosted box. The script now defaults to the OSS identifier, remains overridable, and
+names both candidates in its failure path — because a wrong audience fails *identically to
+a bad client secret*, which is what made the wrong answer so easy to keep.
+
+Then: `python3 scripts/logto_provision.py` (dry run) → `--apply` → run again, which must
+report *nothing to do*.
 
 ## Trust boundary
 
@@ -86,11 +91,28 @@ grant of authority.
   after a failed refresh. Policy (algorithm allowlist, audience, age bound) stays ours.
 - **Production refuses local auth.** `AUTH_MODE=local` remains dev-only; there is no
   "either works" fallback.
+- **"Could not read" is never "nothing is configured."** The provisioner refuses to write
+  when an existing application's metadata cannot be read, and refuses to treat an
+  unexpected response shape as an empty collection. Both would otherwise delete or
+  duplicate registrations the script does not own. A create whose response never arrives
+  is reconciled by exact identity, precisely because the write may have succeeded.
+- **A test that lies is worse than no test.** The intermittent verifier failures were my
+  own fixture publishing malformed EC keys: `big.Int.Bytes()` drops leading zero bytes, so
+  ~1.5% of generated P-384 coordinates encoded to 47 bytes instead of 48. The first
+  explanation (shared connection pool) was tested and disproven, and the comment asserting
+  it was corrected rather than deleted.
 
 ## Order
 
-1. Verifier + policy — **done**, hermetic tests green (discovery-driven fixture).
-2. Provisioning — **written**, dry-run path verified, blocked on the credential above.
+1. Verifier + policy — **done.** Verification delegates to `github.com/coreos/go-oidc`;
+   tests run against a fixture that serves a real discovery document, and pass under
+   `-race -count=50` with no data race.
+2. Provisioning — **written and contract-tested (38/38 against a mock Management API),
+   never executed against real Logto**, blocked on the credential above. Writing those
+   tests found two real defects: the success path crashed on a fresh host after already
+   mutating the tenant (it never created its own config directory), and pagination
+   compared each page against a hardcoded size, which can stop early and miss an existing
+   object — the condition that produces duplicates.
 3. Identity linking + `AUTH_MODE=oidc` bearer path — **done** (`011_identity_links`,
    `identity_links` + `oidc_identity.go`, wired through `Server.auth`). Verified by unit
    tests; no live Logto token has been verified yet, because there is no credential.
