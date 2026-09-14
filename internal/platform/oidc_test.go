@@ -8,6 +8,8 @@ import (
 	"crypto/sha512"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -38,23 +40,40 @@ func newIssuerFixture(t *testing.T) *issuerFixture {
 		key, kid := f.key, f.kid
 		f.mu.RUnlock()
 
+		// Derived from the request, NOT from f.srv: reading f.srv here would race with the
+		// test goroutine's assignment of it (the handler goroutine has no happens-before
+		// edge to that write), and -race flags it while a plain run passes. The server
+		// advertising its own address is also closer to what a real issuer does.
+		base := "http://" + r.Host
+
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/.well-known/openid-configuration":
 			_ = json.NewEncoder(w).Encode(map[string]any{
-				"issuer":                                f.srv.URL,
-				"jwks_uri":                              f.srv.URL + "/jwks",
-				"authorization_endpoint":                f.srv.URL + "/auth",
-				"token_endpoint":                        f.srv.URL + "/token",
+				"issuer":                                base,
+				"jwks_uri":                              base + "/jwks",
+				"authorization_endpoint":                base + "/auth",
+				"token_endpoint":                        base + "/token",
 				"id_token_signing_alg_values_supported": []string{"ES384"},
 				"response_types_supported":              []string{"code"},
 				"subject_types_supported":               []string{"public"},
 			})
 		case "/jwks":
 			pub := key.PublicKey
+			// fixedWidth is REQUIRED here. big.Int.Bytes() drops leading zero bytes, so
+			// roughly 1.5% of generated coordinates encoded to 47 bytes instead of 48 and
+			// go-jose correctly refused the key ("invalid EC public key, wrong length for
+			// x"). That produced verification failures on a small, random fraction of
+			// runs -- genuinely intermittent, and not a library or transport problem.
+			x, y := fixedWidth(pub.X, 48), fixedWidth(pub.Y, 48)
+			// Fail loudly and immediately if the material is the wrong size, so a future
+			// regression here is deterministic rather than a 1-in-70 flake.
+			if len(x) != 48 || len(y) != 48 {
+				t.Errorf("fixture published a malformed key: len(x)=%d len(y)=%d", len(x), len(y))
+			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"keys": []map[string]any{{
 				"kty": "EC", "crv": "P-384", "use": "sig", "alg": "ES384", "kid": kid,
-				"x": b64(pub.X.Bytes()), "y": b64(pub.Y.Bytes()),
+				"x": b64(x), "y": b64(y),
 			}}})
 		default:
 			w.WriteHeader(http.StatusNotFound)
@@ -78,6 +97,18 @@ func (f *issuerFixture) generate() (*ecdsa.PrivateKey, error) {
 func (f *issuerFixture) issuer() string { return f.srv.URL }
 
 func b64(b []byte) string { return base64.RawURLEncoding.EncodeToString(b) }
+
+// fixedWidth left-pads a big.Int's big-endian bytes to exactly size bytes. EC coordinates
+// are fixed-width field elements: a leading zero byte is significant and must be sent.
+func fixedWidth(n *big.Int, size int) []byte {
+	b := n.Bytes()
+	if len(b) >= size {
+		return b
+	}
+	out := make([]byte, size)
+	copy(out[size-len(b):], b)
+	return out
+}
 
 // sign mints a token with the current fixture key.
 func (f *issuerFixture) sign(t *testing.T, header, claims map[string]any) string {
@@ -281,6 +312,40 @@ func TestOIDCRefreshesKeysOnRotation(t *testing.T) {
 	second := f.sign(t, nil, f.validClaims(testAudience))
 	if _, err := v.Verify(context.Background(), second); err != nil {
 		t.Fatalf("a token signed by a newly published key must verify without a restart: %v", err)
+	}
+}
+
+// transportFunc lets a test inject a client that cannot reach anything.
+type transportFunc func(*http.Request) (*http.Response, error)
+
+func (f transportFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// The configured client must actually be used. If it were silently ignored, the timeout
+// and pooling properties above would be fiction while appearing to be protection.
+func TestOIDCUsesTheConfiguredClient(t *testing.T) {
+	f := newIssuerFixture(t)
+	v := verifierFor(t, f, testAudience)
+	tok := f.sign(t, nil, f.validClaims(testAudience))
+
+	if _, err := v.Verify(context.Background(), tok); err != nil {
+		t.Fatalf("sanity: the token must verify before injecting a transport: %v", err)
+	}
+
+	// A fresh verifier whose client cannot reach the network at all.
+	blocked, err := NewOIDCVerifier(OIDCConfig{
+		Issuer: f.issuer(), Audience: testAudience, AllowInsecureIssuer: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocked.client = &http.Client{
+		Timeout: time.Second,
+		Transport: transportFunc(func(*http.Request) (*http.Response, error) {
+			return nil, errors.New("transport blocked by test")
+		}),
+	}
+	if _, err := blocked.Verify(context.Background(), tok); err == nil {
+		t.Fatal("the injected client was ignored: verification succeeded with a blocked transport")
 	}
 }
 

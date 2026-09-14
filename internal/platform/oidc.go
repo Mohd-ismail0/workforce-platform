@@ -3,6 +3,7 @@ package platform
 import (
 	"context"
 	"errors"
+	"net/http"
 	"net/url"
 	"strings"
 	"sync"
@@ -65,6 +66,17 @@ type OIDCVerifier struct {
 	// I/O, which keeps the constructor usable in tests and at config-parse time.
 	mu sync.Mutex
 	v  *oidc.IDTokenVerifier
+
+	// client serves discovery and JWKS fetches. It is a DEDICATED client rather than
+	// http.DefaultClient because the default client has NO timeout, so a hung or slow
+	// issuer would stall a verification indefinitely. Setting this field is what makes
+	// the bound real; tests may replace it to inject a transport.
+	//
+	// (An earlier revision also claimed the shared connection pool caused intermittent
+	// failures. That was tested and disproven -- a per-verifier transport failed the same
+	// way. The real cause was a malformed fixture key. The comment is corrected rather
+	// than deleted so the wrong theory is not silently re-adopted.)
+	client *http.Client
 }
 
 func NewOIDCVerifier(cfg OIDCConfig) (*OIDCVerifier, error) {
@@ -111,7 +123,14 @@ func (o *OIDCVerifier) verifier(ctx context.Context) (*oidc.IDTokenVerifier, err
 	if o.v != nil {
 		return o.v, nil
 	}
-	provider, err := oidc.NewProvider(ctx, o.cfg.Issuer)
+	if o.client == nil {
+		o.client = &http.Client{Timeout: 15 * time.Second}
+	}
+	// Supplying the client through the context is how go-oidc is told to use it; without
+	// this it silently falls back to http.DefaultClient and the timeout above does
+	// nothing. The RemoteKeySet captures this context when it is created, so the same
+	// client also serves later JWKS fetches.
+	provider, err := oidc.NewProvider(oidc.ClientContext(ctx, o.client), o.cfg.Issuer)
 	if err != nil {
 		return nil, err
 	}

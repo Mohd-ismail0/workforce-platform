@@ -45,24 +45,29 @@ import urllib.request
 ENDPOINT_DEFAULT = "https://auth.xsama.org"
 
 
-def management_resource_for(endpoint: str) -> str:
-    """The Management API audience — which is NOT the issuer URL.
-
-    Derived from the DEPLOYED instance's own security description, whose worked example
-    is `resource=<endpoint>/api` (https://auth.xsama.org/api/swagger.json →
-    components.securitySchemes.OAuth2). A Logto CLOUD tenant instead uses
-    https://default.logto.app/api, so that value must never be silently assumed for a
-    self-hosted instance — authenticating for the wrong audience fails in a way that
-    looks like a bad client secret.
-    """
-    return endpoint.rstrip("/") + "/api"
+# The Management API audience. Per Logto's own documentation the identifier DIFFERS by
+# edition, and the difference is easy to get backwards:
+#
+#   Logto Cloud:            https://[tenant-id].logto.app/api
+#   Logto OSS/self-hosted:  https://default.logto.app/api
+#
+# Source: "Interact with Management API" (docs.logto.io), which states the OSS form
+# explicitly and shows the `apiIndicator: https://default.logto.app/api` config. An
+# earlier revision of this script derived `<endpoint>/api` from the OpenAPI document's
+# *Cloud* curl example and labelled it the self-hosted form. That was wrong, and wrong in
+# the worst way: authenticating for the wrong audience fails identically to a bad client
+# secret, so it looks like a credentials problem forever.
+MANAGEMENT_RESOURCE_OSS = "https://default.logto.app/api"
 
 CONF = pathlib.Path.home() / ".config/workforce-platform/logto-management.env"
 SECRET_OUT = pathlib.Path.home() / ".config/workforce-platform/oidc-app.env"
 
 API_RESOURCE_NAME = "Workforce Platform API"
-# The API audience the kernel will trust. This is a workforce-specific indicator; it
-# is deliberately NOT the Logto management indicator.
+# The API audience the kernel will trust. This is a DECISION, not a discovered value:
+# it must be an identifier we control and that nothing else in this tenant already uses, so
+# the kernel can tell our own tokens apart from any other application's. It is deliberately
+# NOT the Logto management indicator, and it is overridable via WORKFORCE_OIDC_AUDIENCE
+# when the kernel is configured.
 API_INDICATOR = "https://workforce.internal/api"
 
 # A confidential client. The backend performs the authorization-code exchange and
@@ -70,6 +75,10 @@ API_INDICATOR = "https://workforce.internal/api"
 # right choice only if the browser itself called Logto directly, which this design
 # does not do.
 WEB_APP_NAME = "Workforce Platform (backend-for-frontend)"
+# NOTE: the backend does NOT yet serve /auth/callback. The interactive browser flow
+# (authorization code + PKCE, sessions, cookies, CSRF) is not implemented, so this URI is
+# registered ahead of that work. Registering it early is normal and harmless; presenting it
+# as a working endpoint would not be.
 WEB_REDIRECT_URIS = ["http://127.0.0.1:8095/auth/callback"]
 WEB_LOGOUT_URIS = ["http://127.0.0.1:8095/"]
 
@@ -137,11 +146,11 @@ class Client:
                 f"  Three causes, in order of likelihood:\n"
                 f"    1. the client id/secret is wrong;\n"
                 f"    2. the M2M application does not hold the Management API role;\n"
-                f"    3. the MANAGEMENT RESOURCE is wrong. This is the subtle one, because\n"
-                f"       it fails exactly like a bad secret and the value is genuine\n"
-                f"       ambiguity, not something this script can determine:\n"
-                f"         self-hosted Logto: <endpoint>/api     ({self.endpoint}/api)\n"
-                f"         Logto Cloud:       https://default.logto.app/api\n"
+                f"    3. the MANAGEMENT RESOURCE is wrong. This is the subtle one: it\n"
+                f"       fails exactly like a bad secret. Per Logto's documentation the\n"
+                f"       identifier differs by edition:\n"
+                f"         self-hosted / OSS: {MANAGEMENT_RESOURCE_OSS}\n"
+                f"         Logto Cloud:       https://[tenant-id].logto.app/api\n"
                 f"       This run used: {self.resource}\n"
                 f"       Confirm it against the instance and set LOGTO_MANAGEMENT_RESOURCE\n"
                 f"       explicitly in {CONF}.")
@@ -262,21 +271,19 @@ def load_credentials() -> tuple[str, str, str, str]:
             "         LOGTO_MANAGEMENT_CLIENT_SECRET=<secret>\n"
             "         LOGTO_MANAGEMENT_RESOURCE=<management API indicator>  # see below\n"
             "       then: chmod 600 " + str(CONF) + "\n"
-            "  The management resource is NOT the issuer URL. If you omit it, this\n"
-            "  script derives <endpoint>/api, which matches this deployment's own\n"
-            "  documented example; a Logto Cloud tenant uses a different value. Set it\n"
-            "  explicitly if you want the derivation skipped.\n"
+            "  The management resource is NOT the issuer URL, and it differs by Logto\n"
+            "  edition: self-hosted/OSS uses " + MANAGEMENT_RESOURCE_OSS + ",\n"
+            "  while Logto Cloud uses https://[tenant-id].logto.app/api. If you omit the\n"
+            "  variable the script assumes the OSS value (this instance is self-hosted).\n"
             "  This script reads the file directly: the secret never appears in a command\n"
             "  line, in this output, or in the platform runtime.")
     if not resource:
-        derived = management_resource_for(endpoint)
-        print(f"NOTE: LOGTO_MANAGEMENT_RESOURCE is not set; deriving it from the endpoint "
-              f"as\n      {derived}\n"
-              f"      This follows the deployment's own documented example "
-              f"(resource=<endpoint>/api).\n"
-              f"      If this instance overrides it, authentication fails in a way that "
-              f"resembles\n      a bad client secret. Set it explicitly in {CONF} if so.")
-        resource = derived
+        print(f"NOTE: LOGTO_MANAGEMENT_RESOURCE is not set; using the Logto Open Source "
+              f"identifier\n      {MANAGEMENT_RESOURCE_OSS}\n"
+              f"      (this instance is self-hosted). Logto Cloud would instead use\n"
+              f"      https://[tenant-id].logto.app/api. Getting this wrong fails exactly\n"
+              f"      like a bad client secret, so set it explicitly in {CONF} to be sure.")
+        resource = MANAGEMENT_RESOURCE_OSS
     return endpoint, cid, secret, resource
 
 
@@ -424,12 +431,23 @@ def main() -> int:
     else:
         app_id = app_match.get("id")
         detail = c.app_detail(app_id) or app_match
-        merged_redirect = list(dict.fromkeys(
-            uris_of(detail, "redirectUris") + WEB_REDIRECT_URIS))
-        merged_logout = list(dict.fromkeys(
-            uris_of(detail, "postLogoutRedirectUris") + WEB_LOGOUT_URIS))
-        if (set(merged_redirect) != set(uris_of(detail, "redirectUris"))
-                or set(merged_logout) != set(uris_of(detail, "postLogoutRedirectUris"))):
+        known_redirect = uris_of(detail, "redirectUris")
+        known_logout = uris_of(detail, "postLogoutRedirectUris")
+        # Guard: "could not read" is NOT "nothing is configured". If neither the detail
+        # fetch nor the list entry carried OIDC metadata, the existing destinations are
+        # UNKNOWN, and PATCHing a list built only from our own URIs would silently delete
+        # another application's redirect or logout targets.
+        if not detail.get("oidcClientMetadata") and not known_redirect and not known_logout:
+            die(f"the existing application's OIDC metadata could not be read (id={app_id}), "
+                f"so its current redirect/logout URIs are unknown. Refusing to update: "
+                f"writing only our own URIs could delete existing destinations. Inspect it "
+                f"in the Logto console and re-run.")
+        merged_redirect = list(dict.fromkeys(known_redirect + WEB_REDIRECT_URIS))
+        merged_logout = list(dict.fromkeys(known_logout + WEB_LOGOUT_URIS))
+        # Compared as SETS so a mere ordering difference does not trigger a write; an
+        # unchanged registration therefore produces no PATCH and a re-run is a true no-op.
+        if (set(merged_redirect) != set(known_redirect)
+                or set(merged_logout) != set(known_logout)):
             status, _ = c.call("PATCH", f"/api/applications/{app_id}", {
                 "oidcClientMetadata": {
                     "redirectUris": merged_redirect,
