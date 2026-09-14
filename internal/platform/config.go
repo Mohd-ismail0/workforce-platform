@@ -20,6 +20,10 @@ type Config struct {
 	Tokens      map[string]Identity
 	DatabaseURL string
 	Address     string
+	// OIDC is populated only in oidc mode. It carries the trust anchors the verifier
+	// needs; the verifier itself performs NO network I/O at construction, so loading
+	// config stays cheap and testable.
+	OIDC OIDCConfig
 }
 
 func LoadConfig() (Config, error) {
@@ -34,10 +38,23 @@ func LoadConfig() (Config, error) {
 	if mode != "local" && mode != "oidc" {
 		return Config{}, fmt.Errorf("unsupported AUTH_MODE %q", mode)
 	}
-	if mode == "oidc" {
-		return Config{}, errors.New("OIDC adapter is not implemented; production startup refused")
-	}
 	c := Config{AuthMode: mode, Tokens: map[string]Identity{}, DatabaseURL: os.Getenv("DATABASE_URL"), Address: os.Getenv("HTTP_ADDR")}
+	if mode == "oidc" {
+		// Bounded scope of this mode today: it verifies a bearer token and resolves the
+		// verified (issuer, subject) to a platform principal. The INTERACTIVE browser
+		// flow — authorization code + PKCE, server-side sessions, cookies, CSRF — is
+		// not wired yet, so oidc mode currently serves API clients that present a
+		// token. Production refuses local auth (checked above) either way.
+		c.OIDC = OIDCConfig{
+			Issuer:   strings.TrimSpace(os.Getenv("WORKFORCE_OIDC_ISSUER")),
+			Audience: strings.TrimSpace(os.Getenv("WORKFORCE_OIDC_AUDIENCE")),
+		}
+		// Validated here so a misconfigured issuer or audience fails at startup rather
+		// than on the first request.
+		if _, err := NewOIDCVerifier(c.OIDC); err != nil {
+			return Config{}, fmt.Errorf("AUTH_MODE=oidc: %w", err)
+		}
+	}
 	if c.Address == "" {
 		c.Address = ":8080"
 	}

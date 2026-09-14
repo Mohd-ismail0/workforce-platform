@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"github.com/jackc/pgx/v5"
 	"regexp"
-	"strings"
 	"workforce.local/platform/internal/connectors"
 	"workforce.local/platform/internal/platform"
 )
@@ -79,5 +78,3 @@ func releaseBusinessOperations(ctx context.Context, tx pgx.Tx, org, proposal str
 	_, err := tx.Exec(ctx, `UPDATE business_operations SET status='released',updated_at=clock_timestamp() WHERE org_id=$1 AND proposal_id=$2 AND status='reserved'`, org, proposal)
 	return err
 }
-
-var _ = strings.TrimSpace

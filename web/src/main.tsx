@@ -364,6 +364,71 @@ export function Gates({ setError }: { setError: (v: string) => void }) {
     </section>
   );
 }
+// maxListItems mirrors the server's bound (maxGateArrayItems): every input entry point
+// is bounded, and a gate answer is one. Rejecting here gives the person a clear message
+// instead of a 422 after they have typed everything.
+const maxListItems = 64;
+
+// parseListField turns one text field into a typed list answer.
+//
+// A gate may declare `array` with scalar `items` because a real model asked for
+// `recipients` as an array — precisely what the mail connector requires. The server
+// accepts that shape, but the UI rendered every non-boolean as a plain input, turning
+// the answer into a bare string that the server refuses with 422. This keeps the declared
+// type intact and reports an unsupported item type rather than guessing.
+function parseListField(
+  raw: string,
+  itemType?: string,
+): { ok: true; value: unknown[] } | { ok: false; error: string } {
+  const parts = raw.split(",").map((p) => p.trim()).filter((p) => p !== "");
+  if (parts.length > maxListItems) {
+    return { ok: false, error: `at most ${maxListItems} entries` };
+  }
+  switch (itemType) {
+    case "string":
+      return { ok: true, value: parts };
+    case "integer": {
+      const nums: number[] = [];
+      for (const p of parts) {
+        const n = Number(p);
+        if (!Number.isInteger(n)) return { ok: false, error: `"${p}" must be a whole number` };
+        // Beyond 2^53-1 a JS number silently becomes a DIFFERENT integer, and the server
+        // would accept that wrong value. Refuse rather than record something not typed.
+        if (!Number.isSafeInteger(n)) {
+          return { ok: false, error: `"${p}" is too large to enter safely` };
+        }
+        nums.push(n);
+      }
+      return { ok: true, value: nums };
+    }
+    case "number": {
+      const nums: number[] = [];
+      for (const p of parts) {
+        const n = Number(p);
+        if (!Number.isFinite(n)) return { ok: false, error: `"${p}" must be a number` };
+        nums.push(n);
+      }
+      return { ok: true, value: nums };
+    }
+    case "boolean": {
+      // Kept for parity with the server, which accepts boolean items. Accepting only
+      // the exact words (not "yes"/"1") avoids quietly recording a truthy typo as true.
+      const bools: boolean[] = [];
+      for (const p of parts) {
+        const v = p.toLowerCase();
+        if (v !== "true" && v !== "false") {
+          return { ok: false, error: `"${p}" must be true or false` };
+        }
+        bools.push(v === "true");
+      }
+      return { ok: true, value: bools };
+    }
+    default:
+      // Refuse visibly rather than sending an answer the server cannot record.
+      return { ok: false, error: "this question asks for a list type this form cannot build" };
+  }
+}
+
 function GateCard({ gate, load, setError }: { gate: Gate; load: () => void; setError: (v: string) => void }) {
   const properties = gate.input_schema.properties || {};
   const required = new Set(gate.input_schema.required || []);
@@ -374,6 +439,26 @@ function GateCard({ gate, load, setError }: { gate: Gate; load: () => void; setE
     const response: Record<string, unknown> = {};
     for (const [name, schema] of Object.entries(properties)) {
       const value = values[name];
+
+      // A LIST answer. The server accepts `array` fields with scalar items because a
+      // real model asked for `recipients` as an array — exactly what the mail connector
+      // needs. Rendering every non-boolean as a text input silently turned that answer
+      // into a bare string, which the server rejects with 422: the question was
+      // answerable by a script but not by a person.
+      if (schema.type === "array") {
+        const parsed = parseListField(String(value ?? ""), schema.items?.type);
+        if (!parsed.ok) {
+          setStatus(`${name}: ${parsed.error}`);
+          return;
+        }
+        if (required.has(name) && parsed.value.length === 0) {
+          setStatus(`${name} needs at least one entry.`);
+          return;
+        }
+        if (parsed.value.length > 0) response[name] = parsed.value;
+        continue;
+      }
+
       if (required.has(name) && (schema.type === "boolean" ? value === undefined : String(value ?? "").trim() === "")) {
         setStatus(`${name} is required.`);
         return;
@@ -411,6 +496,17 @@ function GateCard({ gate, load, setError }: { gate: Gate; load: () => void; setE
             {name}{required.has(name) ? " *" : ""}
             {schema.type === "boolean" ? (
               <input type="checkbox" checked={Boolean(values[name])} onChange={(e) => setValues({ ...values, [name]: e.target.checked })} />
+            ) : schema.type === "array" ? (
+              // A LIST answer is entered as comma-separated text and converted on submit.
+              // The previous fallback rendered it as a number input, so a list of email
+              // addresses could not be typed at all — the question was answerable by a
+              // script but not by a person.
+              <input
+                type="text"
+                placeholder="comma-separated"
+                value={String(values[name] ?? "")}
+                onChange={(e) => setValues({ ...values, [name]: e.target.value })}
+              />
             ) : (
               <input type={schema.type === "string" ? "text" : "number"} step={schema.type === "integer" ? 1 : undefined} value={String(values[name] ?? "")} onChange={(e) => setValues({ ...values, [name]: e.target.value })} />
             )}

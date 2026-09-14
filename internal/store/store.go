@@ -857,5 +857,3 @@ func Seed(ctx context.Context, s *Store) error {
 		return nil
 	})
 }
-
-var _ = strings.TrimSpace

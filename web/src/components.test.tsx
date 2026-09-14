@@ -352,6 +352,98 @@ describe("gates", () => {
     expect(screen.getByRole("status").textContent).toContain("whole number");
     expect(fetchMock.mock.calls.every(([, init]) => !init?.method || init.method !== "POST")).toBe(true);
   });
+
+  // An array field must be answerable by a PERSON. The backend accepts scalar arrays
+  // because a real model asked for `recipients` as an array — exactly what the mail
+  // connector requires — but the form previously turned that answer into a bare string
+  // the server refuses with 422. A script passing did not mean a human could answer.
+  const arrayGate = {
+    id: "gate-arr", org_id: "o", task_id: "task-9", run_id: "run-9",
+    kind: "missing_information", prompt: "Who should this go to?",
+    input_schema: {
+      properties: { recipients: { type: "array", items: { type: "string" } } },
+      required: ["recipients"],
+    },
+    revision: 1, status: "pending", respondent_id: "p", created_by: "a",
+    created_at: "2026-01-01T00:00:00Z", version: 1,
+  };
+
+  it("posts a LIST answer for a declared array field", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) =>
+      String(input).endsWith("/gates")
+        ? new Response(JSON.stringify({ items: [arrayGate] }), { status: 200 })
+        : new Response(JSON.stringify({ ...arrayGate, response: { recipients: ["a@x.test", "b@x.test"] } }), { status: 200 }));
+    render(<Gates setError={vi.fn()} />);
+    await waitFor(() => screen.getByText("Who should this go to?"));
+    fireEvent.change(screen.getByLabelText("recipients *"), { target: { value: "a@x.test, b@x.test" } });
+    fireEvent.submit(screen.getByRole("form", { name: "Answer gate gate-arr" }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([, init]) =>
+      String(init?.body) === JSON.stringify({ revision: 1, response: { recipients: ["a@x.test", "b@x.test"] } }))).toBe(true));
+  });
+
+  // Numeric and boolean item types must round-trip as numbers/booleans, not strings:
+  // the server validates per declared type, so a stringified list would be refused.
+  it("posts typed entries for integer and boolean array fields", async () => {
+    const typedGate = {
+      ...arrayGate,
+      id: "gate-typed",
+      prompt: "Which values?",
+      input_schema: {
+        properties: {
+          counts: { type: "array", items: { type: "integer" } },
+          flags: { type: "array", items: { type: "boolean" } },
+        },
+        required: ["counts", "flags"],
+      },
+    };
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) =>
+      String(input).endsWith("/gates")
+        ? new Response(JSON.stringify({ items: [typedGate] }), { status: 200 })
+        : new Response(JSON.stringify(typedGate), { status: 200 }));
+    render(<Gates setError={vi.fn()} />);
+    await waitFor(() => screen.getByText("Which values?"));
+    fireEvent.change(screen.getByLabelText("counts *"), { target: { value: "1, 2, 3" } });
+    fireEvent.change(screen.getByLabelText("flags *"), { target: { value: "true, false" } });
+    fireEvent.submit(screen.getByRole("form", { name: "Answer gate gate-typed" }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([, init]) =>
+      String(init?.body) === JSON.stringify({
+        revision: 1, response: { counts: [1, 2, 3], flags: [true, false] },
+      }))).toBe(true));
+  });
+
+  // A large integer must be refused, not silently stored as a different number.
+  it("refuses an integer beyond the safe range without posting", async () => {
+    const bigGate = {
+      ...arrayGate,
+      id: "gate-big",
+      input_schema: {
+        properties: { ids: { type: "array", items: { type: "integer" } } },
+        required: ["ids"],
+      },
+    };
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ items: [bigGate] }), { status: 200 }));
+    render(<Gates setError={vi.fn()} />);
+    await waitFor(() => screen.getByText("Who should this go to?"));
+    fireEvent.change(screen.getByLabelText("ids *"), { target: { value: "9007199254740993" } });
+    fireEvent.submit(screen.getByRole("form", { name: "Answer gate gate-big" }));
+    await waitFor(() => expect(screen.getByRole("status").textContent).toContain("too large"));
+    expect(fetchMock.mock.calls.every(([, init]) => !init?.method || init.method !== "POST")).toBe(true);
+  });
+
+  it("refuses an unsupported array item type without posting", async () => {
+    const unsupported = {
+      ...arrayGate,
+      id: "gate-bad",
+      input_schema: { properties: { things: { type: "array", items: { type: "object" } } }, required: ["things"] },
+    };
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ items: [unsupported] }), { status: 200 }));
+    render(<Gates setError={vi.fn()} />);
+    await waitFor(() => screen.getByText("Who should this go to?"));
+    fireEvent.change(screen.getByLabelText("things *"), { target: { value: "something" } });
+    fireEvent.submit(screen.getByRole("form", { name: "Answer gate gate-bad" }));
+    await waitFor(() => expect(screen.getByRole("status").textContent).toContain("cannot build"));
+    expect(fetchMock.mock.calls.every(([, init]) => !init?.method || init.method !== "POST")).toBe(true);
+  });
 });
 
 

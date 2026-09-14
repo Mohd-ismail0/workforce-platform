@@ -81,7 +81,11 @@ export type HandoffOffer = {
 
 export type GateKind = "clarification" | "selection" | "missing_information";
 export type GateProperty = {
-  type: "string" | "integer" | "number" | "boolean";
+  type: "string" | "integer" | "number" | "boolean" | "array";
+  // A gate may ask for a LIST. A real model asked for `recipients` as an array of
+  // strings — exactly what the mail connector requires — so the declared item type is
+  // carried through rather than collapsed into a bare string.
+  items?: { type?: "string" | "integer" | "number" | "boolean" };
 };
 export type Gate = {
   id: string;

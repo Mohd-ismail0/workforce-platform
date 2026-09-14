@@ -15,9 +15,21 @@ type Server struct {
 	cfg      platform.Config
 	store    *store.Store
 	registry *connectors.Registry
+	// oidc verifies bearer tokens in oidc mode. It is built at construction; the
+	// verifier performs no network I/O until the first token arrives, so startup does
+	// not depend on the issuer being reachable.
+	oidc *platform.OIDCVerifier
 }
 
-func New(c platform.Config, st *store.Store) *Server { return &Server{c, st, connectors.NewRegistry()} }
+func New(c platform.Config, st *store.Store) *Server {
+	s := &Server{c, st, connectors.NewRegistry(), nil}
+	if c.AuthMode == "oidc" {
+		if v, err := platform.NewOIDCVerifier(c.OIDC); err == nil {
+			s.oidc = v
+		}
+	}
+	return s
+}
 func (s *Server) Handler() http.Handler {
 	m := http.NewServeMux()
 	m.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) { jsonWrite(w, 200, map[string]string{"status": "ok"}) })
@@ -35,23 +47,50 @@ func (s *Server) Handler() http.Handler {
 	m.HandleFunc("/api/v1/", s.api)
 	return m
 }
+
+// auth turns a request into an authority-bearing identity.
+//
+// Authentication establishes WHO the caller is; authority (org, role, ownership,
+// jurisdiction) comes from kernel rows and is never taken from a token. Both modes end
+// at a principal row, so a token cannot mint authority that the database does not
+// already grant.
 func (s *Server) auth(r *http.Request) (platform.Identity, error) {
-	if s.cfg.AuthMode != "local" {
-		return platform.Identity{}, errors.New("OIDC authentication is not configured")
-	}
 	h := strings.TrimSpace(r.Header.Get("Authorization"))
 	if !strings.HasPrefix(h, "Bearer ") {
 		return platform.Identity{}, errors.New("missing bearer token")
 	}
-	id, ok := s.cfg.Tokens[strings.TrimSpace(strings.TrimPrefix(h, "Bearer "))]
-	if !ok {
-		return platform.Identity{}, errors.New("invalid token")
+	raw := strings.TrimSpace(strings.TrimPrefix(h, "Bearer "))
+	switch s.cfg.AuthMode {
+	case "local":
+		// Dev-only. Production refuses this mode at config load.
+		id, ok := s.cfg.Tokens[raw]
+		if !ok {
+			return platform.Identity{}, errors.New("invalid token")
+		}
+		actual, err := s.store.ResolveIdentity(r.Context(), id)
+		if err != nil {
+			return platform.Identity{}, errors.New("identity unavailable or revoked")
+		}
+		return actual, nil
+	case "oidc":
+		if s.oidc == nil {
+			return platform.Identity{}, errors.New("authentication is not configured")
+		}
+		claims, err := s.oidc.Verify(r.Context(), raw)
+		if err != nil {
+			return platform.Identity{}, errors.New("identity could not be verified")
+		}
+		// A verified token with NO linked principal is refused. There is no
+		// auto-provisioning and no email-based linking: authenticating successfully is
+		// not the same as being entitled to act.
+		actual, err := s.store.ResolveOIDCIdentity(r.Context(), claims.Issuer, claims.Subject)
+		if err != nil {
+			return platform.Identity{}, errors.New("identity could not be verified")
+		}
+		return actual, nil
+	default:
+		return platform.Identity{}, errors.New("authentication is not configured")
 	}
-	actual, err := s.store.ResolveIdentity(r.Context(), id)
-	if err != nil {
-		return platform.Identity{}, errors.New("identity unavailable or revoked")
-	}
-	return actual, nil
 }
 func decode(r *http.Request, v any) error {
 	r.Body = http.MaxBytesReader(nil, r.Body, 1<<20)
@@ -68,7 +107,9 @@ func decode(r *http.Request, v any) error {
 func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 	id, e := s.auth(r)
 	if e != nil {
-		failCode(w, 401, "unauthenticated", e.Error())
+		// Deliberately generic: telling a caller whether a token was malformed, expired,
+		// unlinked or revoked turns the endpoint into a probe oracle.
+		failCode(w, 401, "unauthenticated", "authentication failed")
 		return
 	}
 	path := strings.TrimPrefix(r.URL.Path, "/api/v1")

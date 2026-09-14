@@ -57,4 +57,39 @@ This is a partial working platform foundation, not completion of the full build 
 
 Parent-executed `python3 scripts/dev.py test` runs Go tests with race detection and real DATABASE_URL (fails rather than silently skips if missing). `go vet ./...` passes. Web tests/build/typecheck are recorded at integration completion. No quantitative productivity or production safety claim.
 
+## Identity and authority (current boundary)
+
+Verified by execution, not assertion:
+
+- `go build ./...`, `go vet ./...` exit 0 (status captured directly, never through a pipe).
+- Full DB-backed suite `python3 scripts/dev.py test` (race, serialized, real `DATABASE_URL`) exit 0.
+- 9 new identity-linking tests **pass, not skip** — including one external account cannot
+  map to two principals, the mapping is globally unique rather than per-org, a deactivated
+  principal stops resolving immediately, unlink deactivates while keeping the audit row,
+  and empty inputs are refused.
+- OIDC verifier tests pass against a fixture that serves a real discovery document, so the
+  code consumes `jwks_uri` instead of a guessed JWKS path.
+- Web: 17 tests pass, typecheck exit 0, build exit 0. Migration 011 applies and is repeatable.
+- `scripts/logto_provision.py` dry run exits 1 with the bootstrap steps and **no** secret
+  echo and no traceback.
+
+**Not established, and not to be implied:**
+
+- No live Logto token has ever been verified. The verifier is proven hermetically only.
+- Provisioning has **not** been applied. No Management API credential was found in the
+  locations searched (that is "not found", not "does not exist").
+- The interactive browser flow is not implemented: no authorization-code login, callback,
+  server-side sessions, cookies or CSRF. `AUTH_MODE=oidc` today verifies a **bearer token**
+  and requires a pre-existing explicit link; without one it refuses every request.
+- Authentication is not authorization. Org, role, ownership, approval jurisdiction and
+  separation of duties come from kernel rows, never from a token claim. A token proves
+  *who*, never *what*.
+- No auto-provisioning on first login and no email-based linking: email is reassignable, so
+  linking on it would be an account-takeover primitive.
+
+Two earlier claims are corrected here. Sending mail is **not reversible** — it is narrow
+and allowlistable, which is weaker. A dedicated unprivileged UID is **not** sufficient
+sandboxing; it reduces exposure without containing a process. Both remain open workstreams;
+clearing OIDC does not clear "all blockers".
+
 See docs/build-spec for the complete destination. No PostgreSQL server was installed locally, no existing application databases modified, no public route created.
