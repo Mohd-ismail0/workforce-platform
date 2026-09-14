@@ -52,6 +52,10 @@ type OIDCConfig struct {
 	// verifies. If the instance ever signs access tokens differently, the bearer path
 	// rejects every valid token, so this is overridable rather than hardcoded.
 	AllowedAlgs []string
+	// Cloudflare Access service-token headers for discovery/JWKS requests. They are held
+	// only by the backend and never exposed to a browser.
+	AccessClientID     string
+	AccessClientSecret string
 }
 
 // Claims is the verified subset we consume. Everything else is ignored rather than
@@ -173,6 +177,9 @@ func (o *OIDCVerifier) verifier(ctx context.Context) (*oidc.IDTokenVerifier, err
 	}
 	if o.client == nil {
 		o.client = &http.Client{Timeout: 15 * time.Second}
+		if o.cfg.AccessClientID != "" && o.cfg.AccessClientSecret != "" {
+			o.client.Transport = accessTransport{base: http.DefaultTransport, id: o.cfg.AccessClientID, secret: o.cfg.AccessClientSecret}
+		}
 	}
 	// Supplying the client through the context is how go-oidc is told to use it; without
 	// this it silently falls back to http.DefaultClient and the timeout above does

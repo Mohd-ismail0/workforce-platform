@@ -40,8 +40,26 @@ type OAuthConfig struct {
 	// AllowedAlgs is the ID-token signing-algorithm allowlist. Empty means ES384, which is
 	// what this deployment advertises for ID tokens.
 	AllowedAlgs []string
+	// Cloudflare Access service-token headers for a protected issuer.
+	AccessClientID     string
+	AccessClientSecret string
 	// SessionTTL bounds a browser session.
 	SessionTTL time.Duration
+}
+
+type accessTransport struct {
+	base   http.RoundTripper
+	id     string
+	secret string
+}
+
+func (t accessTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	clone := r.Clone(r.Context())
+	if t.id != "" && t.secret != "" {
+		clone.Header.Set("CF-Access-Client-Id", t.id)
+		clone.Header.Set("CF-Access-Client-Secret", t.secret)
+	}
+	return t.base.RoundTrip(clone)
 }
 
 // OAuthClient drives the interactive login.
@@ -83,6 +101,9 @@ func NewOAuthClient(ctx context.Context, cfg OAuthConfig) (*OAuthClient, error) 
 	// A dedicated client, not http.DefaultClient: the default has no timeout, so a hung
 	// issuer would stall a login indefinitely.
 	client := &http.Client{Timeout: 15 * time.Second}
+	if cfg.AccessClientID != "" && cfg.AccessClientSecret != "" {
+		client.Transport = accessTransport{base: http.DefaultTransport, id: cfg.AccessClientID, secret: cfg.AccessClientSecret}
+	}
 	ctxWithClient := oidc.ClientContext(ctx, client)
 
 	// The insecure-issuer context is REQUIRED for a plain-http loopback issuer, and its

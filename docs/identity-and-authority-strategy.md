@@ -128,19 +128,19 @@ Two consequences that decide the unbuilt session work:
 
 1. Verifier + policy — **done.** Verification delegates to `github.com/coreos/go-oidc`;
    tests run against a fixture that serves a real discovery document, and pass under
-   `-race -count=50` with no data race.
-2. Provisioning — **written and contract-tested (38/38 against a mock Management API),
-   never executed against real Logto**, blocked on the credential above. Writing those
-   tests found two real defects: the success path crashed on a fresh host after already
-   mutating the tenant (it never created its own config directory), and pagination
-   compared each page against a hardcoded size, which can stop early and miss an existing
-   object — the condition that produces duplicates.
+   `-race -count=50` with no data race. A live Logto Management API token exchange and
+   authenticated read have also passed using the operator M2M credential.
+2. Provisioning — **done and read back.** Resource `e810t1oshvoeefp00d7n5`, scopes and
+   confidential BFF application `v33skrq1quvxkuvrqul8a` are present. The provisioner
+   contract suite remains 38/38; a second dry run is a no-op.
 3. Identity linking + `AUTH_MODE=oidc` bearer path — **done** (`011_identity_links`,
-   `identity_links` + `oidc_identity.go`, wired through `Server.auth`). Verified by unit
-   tests; no live Logto token has been verified yet, because there is no credential.
+   `identity_links` + `oidc_identity.go`, wired through `Server.auth`). The verifier has
+   passed a live Logto discovery/token-key path; a real human identity is still not linked
+   to a workforce principal.
 4. Login/callback/session/cookies/CSRF — **implemented and tested** in the BFF foundation
-   (`012_bff_sessions`, `oauth.go`, `bff.go`). The browser flow is still not live against
-   Logto: provisioning, a real token exchange and a real human login remain unverified.
+   (`012_bff_sessions`, `oauth.go`, `bff.go`). Logto provisioning and the runtime client
+   credential now exist; a real human browser login and explicit principal link remain
+   unverified.
 5. Human-approved first real integration — not started.
 
 ## Corrections to earlier claims

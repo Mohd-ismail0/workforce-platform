@@ -28,7 +28,7 @@ Design properties, each of which is a deliberate choice:
 
 Usage:
   python3 scripts/logto_provision.py            # authenticate + print the diff
-  python3 scripts/logto_provision.py --apply    # apply, then assert readback
+  python3 scripts/logto_provision.py --create-app-secret  # additive, one-time reveal
 """
 from __future__ import annotations
 
@@ -38,10 +38,14 @@ import json
 import os
 import pathlib
 import sys
+
 import urllib.error
 import urllib.parse
 import urllib.request
 
+CF_ACCESS_FILE = pathlib.Path.home() / ".hermes/secrets/cloudflare-access-logto.env"
+USER_AGENT = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+              "(KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36")
 ENDPOINT_DEFAULT = "https://auth.xsama.org"
 
 
@@ -115,6 +119,33 @@ def unwrap_list(doc, path: str) -> list:
         f"look absent and invite duplicate creation")
 
 
+def access_headers() -> dict[str, str]:
+    """Read Cloudflare Access service-token headers from the protected file.
+
+    The existing verifier proved that auth.xsama.org requires these headers. They are
+    added only to outbound requests and never printed or persisted by this script.
+    """
+    vals: dict[str, str] = {}
+    try:
+        if CF_ACCESS_FILE.stat().st_mode & 0o077:
+            die(f"refusing readable-by-others Access credential file: {CF_ACCESS_FILE}")
+        for line in CF_ACCESS_FILE.read_text().splitlines():
+            if line and not line.startswith('#') and '=' in line:
+                k, v = line.split('=', 1)
+                vals[k.strip()] = v.strip()
+    except FileNotFoundError:
+        return {}
+    return {
+        "CF-Access-Client-Id": vals["LOGTO_CLOUDFLARE_ACCESS_CLIENT_ID"],
+        "CF-Access-Client-Secret": vals["LOGTO_CLOUDFLARE_ACCESS_CLIENT_SECRET"],
+    } if vals.get("LOGTO_CLOUDFLARE_ACCESS_CLIENT_ID") and vals.get("LOGTO_CLOUDFLARE_ACCESS_CLIENT_SECRET") else {}
+
+
+def apply_headers(req: urllib.request.Request) -> None:
+    for k, v in access_headers().items():
+        req.add_header(k, v)
+
+
 class Client:
     """Minimal Logto Management API client (stdlib only)."""
 
@@ -135,7 +166,10 @@ class Client:
         req = urllib.request.Request(
             self.endpoint + "/oidc/token", data=body, method="POST",
             headers={"Authorization": "Basic " + basic,
-                     "Content-Type": "application/x-www-form-urlencoded"})
+                     "Content-Type": "application/x-www-form-urlencoded",
+                     "User-Agent": USER_AGENT,
+                     "Accept": "application/json"})
+        apply_headers(req)
         try:
             with urllib.request.urlopen(req, timeout=20) as r:
                 doc = json.loads(r.read())
@@ -165,7 +199,10 @@ class Client:
         req = urllib.request.Request(
             self.endpoint + path, data=data, method=method,
             headers={"Authorization": "Bearer " + self.token,
-                     "Content-Type": "application/json"})
+                     "Content-Type": "application/json",
+                     "User-Agent": USER_AGENT,
+                     "Accept": "application/json"})
+        apply_headers(req)
         try:
             with urllib.request.urlopen(req, timeout=25) as r:
                 raw = r.read()
@@ -316,7 +353,11 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--apply", action="store_true",
                     help="create/update the registrations; without it, a dry run")
+    ap.add_argument("--create-app-secret", action="store_true",
+                    help="create one additive named secret for the provisioned BFF app")
     args = ap.parse_args()
+    if args.apply and args.create_app_secret:
+        die("choose --apply or --create-app-secret, not both")
 
     endpoint, cid, secret, resource = load_credentials()
     print(f"endpoint:            {endpoint}")
@@ -327,6 +368,36 @@ def main() -> int:
     c = Client(endpoint, cid, secret, resource)
     c.authenticate()
     print("authenticated:       yes")
+
+    # Secret creation is a separate command because the returned value is shown only once.
+    # It must never be bundled into a registration update whose retry semantics are more
+    # complicated. The app is matched by the exact provisioner-owned name, and a duplicate
+    # is an error rather than a guess.
+    if args.create_app_secret:
+        apps = c.get_all("/api/applications")
+        app = select_one(apps, "applications", lambda a: a.get("name") == WEB_APP_NAME)
+        if app is None:
+            die("the BFF application is not provisioned yet; run --apply first")
+        app_id = app.get("id")
+        secret_name = "workforce-bff-runtime"
+        status, body = c.call("POST", f"/api/applications/{app_id}/secrets", {"name": secret_name})
+        if status not in (200, 201):
+            die(f"creating the BFF application secret failed (HTTP {status})")
+        value = (body or {}).get("value") or (body or {}).get("secret")
+        if not isinstance(value, str) or len(value) < 18:
+            die("Logto did not return a secret value; refusing to write an incomplete credential")
+        SECRET_OUT.parent.mkdir(parents=True, exist_ok=True)
+        os.chmod(SECRET_OUT.parent, 0o700)
+        SECRET_OUT.write_text(
+            "# Workforce Platform confidential BFF client.\n"
+            "# OPERATOR ONLY: never put this in a browser bundle or runner environment.\n"
+            f"WORKFORCE_OIDC_CLIENT_ID={app_id}\n"
+            f"WORKFORCE_OIDC_CLIENT_SECRET={value}\n")
+        os.chmod(SECRET_OUT, 0o600)
+        print(f"BFF client id: {app_id}")
+        print(f"secret created: name={secret_name}, stored={SECRET_OUT}, mode=600")
+        print("secret value: not printed")
+        return 0
 
     want_api = desired_api()
 
@@ -531,12 +602,10 @@ def main() -> int:
     out.write_text(json.dumps(evidence, indent=2))
     print(f"\n  evidence (no secrets): {out}")
     print("\n  Next: run this again; it must report 'nothing to do'.")
-    print("  AUTH_MODE=oidc now verifies a bearer token and resolves the verified")
-    print("  (issuer, subject) to a platform principal, PROVIDED an explicit link exists")
-    print("  in identity_links. The interactive browser sign-in flow (authorization code")
-    print("  + PKCE, sessions, cookies, CSRF) is NOT wired, and no link exists yet, so")
-    print("  enabling AUTH_MODE=oidc would lock every request out. Register the app and")
-    print("  create links first.")
+    print("  AUTH_MODE=oidc bearer verification and the interactive BFF foundation are now")
+    print("  implemented, but the new app still needs its client credential bound into the")
+    print("  protected runtime environment, and an explicit (issuer, subject) principal link")
+    print("  must exist before a human can act. No auto-linking occurs.")
     return 0
 
 

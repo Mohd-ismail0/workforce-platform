@@ -75,14 +75,19 @@ Verified by execution, not assertion:
 
 **Not established, and not to be implied:**
 
-- No live Logto token has ever been verified. The verifier is proven hermetically only.
-- Provisioning has **not** been applied. No Management API credential was found in the
-  locations searched (that is "not found", not "does not exist").
+- A live Logto Management API credential was used successfully in read-only verification.
+  The existing operator M2M app is `spg9p4spdwoip4dfi51wg`; its credential remains
+  operator-only and is never given to the workforce runtime.
+- Logto provisioning **has been applied and read back successfully**: resource
+  `e810t1oshvoeefp00d7n5` with indicator `https://workforce.internal/api` and scopes
+  `read:work`, `write:work`, `approve:work`; confidential BFF app
+  `v33skrq1quvxkuvrqul8a` with the registered callback and logout URI.
+- The BFF client secret was created additively as `workforce-bff-runtime` and stored in a
+  mode-600 operator-protected file. Its value was never printed.
 - The BFF browser foundation is implemented and tested: authorization-code + PKCE,
   single-use state/nonce transactions, hashed server-side sessions, revocation,
   offboarding checks, HttpOnly/Secure/SameSite cookies and CSRF protection. Migration 012
-  applies repeatably. No live Logto exchange or human browser login has been exercised yet.
-  `AUTH_MODE=oidc` still requires an explicit principal link; without one it refuses access.
+  applies repeatably. A real human browser login has not yet been exercised.
 - Authentication is not authorization. Org, role, ownership, approval jurisdiction and
   separation of duties come from kernel rows, never from a token claim. A token proves
   *who*, never *what*.

@@ -40,6 +40,11 @@ type BrowserConfig struct {
 	RedirectURL  string
 	// PostLogoutURL is where the provider returns the browser after an end-session call.
 	PostLogoutURL string
+	// Cloudflare Access service-token headers for the protected issuer. They are held only
+	// by the backend and never sent to the browser. Empty means the issuer is not behind
+	// Access or that the deployment is not configured for this boundary.
+	AccessClientID     string
+	AccessClientSecret string
 	// CookieSecure must be true in production. It is a configuration decision rather than
 	// inferred from the request, because inferring it would let a proxied plaintext request
 	// silently downgrade the cookie.
@@ -71,6 +76,8 @@ func (b BrowserConfig) OAuth(issuer string) OAuthConfig {
 		// the environment, and checkIssuerScheme still refuses anything but loopback.
 		AllowInsecureIssuer: b.AllowInsecureIssuer,
 		AllowedAlgs:         append([]string(nil), b.AllowedAlgs...),
+		AccessClientID:      b.AccessClientID,
+		AccessClientSecret:  b.AccessClientSecret,
 	}
 }
 
@@ -88,14 +95,14 @@ func LoadConfig() (Config, error) {
 	}
 	c := Config{AuthMode: mode, Tokens: map[string]Identity{}, DatabaseURL: os.Getenv("DATABASE_URL"), Address: os.Getenv("HTTP_ADDR")}
 	if mode == "oidc" {
-		// Bounded scope of this mode today: it verifies a bearer token and resolves the
-		// verified (issuer, subject) to a platform principal. The INTERACTIVE browser
-		// flow — authorization code + PKCE, server-side sessions, cookies, CSRF — is
-		// not wired yet, so oidc mode currently serves API clients that present a
-		// token. Production refuses local auth (checked above) either way.
+		// Bearer verification and the interactive BFF browser flow are both wired. The
+		// issuer may sit behind Cloudflare Access, so the protected service-token headers
+		// are carried for discovery and JWKS as well as for the OAuth exchange.
 		c.OIDC = OIDCConfig{
-			Issuer:   strings.TrimSpace(os.Getenv("WORKFORCE_OIDC_ISSUER")),
-			Audience: strings.TrimSpace(os.Getenv("WORKFORCE_OIDC_AUDIENCE")),
+			Issuer:             strings.TrimSpace(os.Getenv("WORKFORCE_OIDC_ISSUER")),
+			Audience:           strings.TrimSpace(os.Getenv("WORKFORCE_OIDC_AUDIENCE")),
+			AccessClientID:     strings.TrimSpace(os.Getenv("WORKFORCE_LOGTO_CF_ACCESS_CLIENT_ID")),
+			AccessClientSecret: strings.TrimSpace(os.Getenv("WORKFORCE_LOGTO_CF_ACCESS_CLIENT_SECRET")),
 		}
 		// Validated here so a misconfigured issuer or audience fails at startup rather
 		// than on the first request.
@@ -104,11 +111,13 @@ func LoadConfig() (Config, error) {
 		}
 
 		c.Browser = BrowserConfig{
-			ClientID:      strings.TrimSpace(os.Getenv("WORKFORCE_OIDC_CLIENT_ID")),
-			ClientSecret:  strings.TrimSpace(os.Getenv("WORKFORCE_OIDC_CLIENT_SECRET")),
-			RedirectURL:   strings.TrimSpace(os.Getenv("WORKFORCE_OIDC_REDIRECT_URL")),
-			PostLogoutURL: strings.TrimSpace(os.Getenv("WORKFORCE_OIDC_POST_LOGOUT_URL")),
-			CookieSecure:  cookieSecureFromEnv(),
+			ClientID:           strings.TrimSpace(os.Getenv("WORKFORCE_OIDC_CLIENT_ID")),
+			ClientSecret:       strings.TrimSpace(os.Getenv("WORKFORCE_OIDC_CLIENT_SECRET")),
+			RedirectURL:        strings.TrimSpace(os.Getenv("WORKFORCE_OIDC_REDIRECT_URL")),
+			PostLogoutURL:      strings.TrimSpace(os.Getenv("WORKFORCE_OIDC_POST_LOGOUT_URL")),
+			AccessClientID:     strings.TrimSpace(os.Getenv("WORKFORCE_LOGTO_CF_ACCESS_CLIENT_ID")),
+			AccessClientSecret: strings.TrimSpace(os.Getenv("WORKFORCE_LOGTO_CF_ACCESS_CLIENT_SECRET")),
+			CookieSecure:       cookieSecureFromEnv(),
 		}
 		// A plaintext session cookie in production would let anyone on the path read a
 		// credential that grants the whole account. Refused at startup rather than warned
