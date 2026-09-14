@@ -180,25 +180,34 @@ class Client:
             # Network/timeout: the caller must treat this as UNCERTAIN, not failed.
             return 0, None
 
+    # PAGE is used for BOTH the request and the end-of-pages comparison. Comparing against
+    # a literal while requesting something else is a silent way to stop early (miss items)
+    # or loop forever if the two ever drift apart.
+    PAGE = 100
+
     def get_all(self, path: str) -> list:
         """Walk pagination so a readback covers EVERY page.
 
-        A first-page-only read would cheerfully 'create' a duplicate of an object that
-        already exists further down the list.
+        Two deliberate choices:
+          * a first-page-only read would cheerfully 'create' a duplicate of an object that
+            already exists further down the list;
+          * only a GENUINELY EMPTY page ends the walk. A short page still means "more may
+            follow" here, because stopping early on a partial page silently truncates the
+            read and re-introduces the duplicate-creation risk this exists to prevent.
         """
         out, page = [], 1
         while True:
             sep = "&" if "?" in path else "?"
-            status, doc = self.call("GET", f"{path}{sep}page={page}&page_size=100")
+            status, doc = self.call("GET", f"{path}{sep}page={page}&page_size={self.PAGE}")
             if status != 200:
                 die(f"GET {path} failed (HTTP {status})")
             items = unwrap_list(doc, path)
             if not items:
                 break
             out.extend(items)
-            if len(items) < 100:
-                break
             page += 1
+            if page > 1000:
+                die(f"GET {path} exceeded 1000 pages; refusing to loop further")
         return out
 
     def app_detail(self, app_id: str) -> dict:
@@ -488,6 +497,15 @@ def main() -> int:
     print(f"  post-logout: {final_logout}  OK")
 
     if new_secret:
+        # The parent directory may not exist on a fresh host. Without this, the SUCCESS
+        # path raises FileNotFoundError *after* the tenant has already been mutated, which
+        # is the worst possible ordering: the registrations exist but the operator has no
+        # secret and no indication of what completed. Created mode 700.
+        SECRET_OUT.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            SECRET_OUT.parent.chmod(0o700)
+        except OSError:
+            pass
         SECRET_OUT.write_text(
             "# Workforce Platform backend-for-frontend OIDC client.\n"
             "# Confidential: the backend performs the code exchange. Never ship this to\n"

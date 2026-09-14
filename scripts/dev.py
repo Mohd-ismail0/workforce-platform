@@ -4,6 +4,7 @@ import argparse
 import os
 from pathlib import Path
 import subprocess
+import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 p = argparse.ArgumentParser()
@@ -36,4 +37,15 @@ commands={
  'test':['go','test','-race','-count=1','-p','1','./...'],
  'build':['go','build','-o','bin/workforce','./cmd/workforce'],
 }
-raise SystemExit(subprocess.call(commands[a.action],cwd=ROOT,env=env))
+# Non-Go suites that are part of the same green bar. The provisioning contract tests
+# guard a script that will mutate a live identity provider, so they run with `test`
+# rather than depending on someone remembering to run them by hand.
+extra_suites={'test':[[sys.executable,'scripts/logto_provision_contract_test.py']]}
+def run(cmd):
+    print('+ '+' '.join(cmd),flush=True)
+    return subprocess.call(cmd,cwd=ROOT,env=env)
+code=run(commands[a.action])
+for cmd in extra_suites.get(a.action,[]):
+    if code!=0: break
+    code=run(cmd)
+raise SystemExit(code)
