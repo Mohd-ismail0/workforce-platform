@@ -102,6 +102,28 @@ grant of authority.
   explanation (shared connection pool) was tested and disproven, and the comment asserting
   it was corrected rather than deleted.
 
+## Verified development topology (input to the browser flow)
+
+Read from `web/vite.config.ts` and `README.md`, not assumed:
+
+| Piece | Where it actually runs |
+|---|---|
+| SPA (Vite dev server) | `127.0.0.1:5175` |
+| Backend / API | `127.0.0.1:8095` |
+| Proxy | only `/api`, `/health`, `/ready` forward 5175 → 8095 |
+
+Two consequences that decide the unbuilt session work:
+
+- **The callback belongs to the backend**, so `http://127.0.0.1:8095/auth/callback` is the
+  correct registration for a BFF. The browser navigates to the backend directly; the proxy
+  is irrelevant to that hop. (The route does not exist yet — it is registered ahead of the
+  handler, which is normal, and the provisioner's own output says so.)
+- **Cookies are scoped to the host, not the port.** A session cookie set by 8095 on
+  `127.0.0.1` is therefore sent by the SPA running on 5175, and its proxied `/api` calls
+  carry it through. That is what makes the BFF workable unchanged in dev, and it is also why
+  `SameSite` and an explicit CSRF defence are required rather than optional: the cookie is
+  attached to cross-port requests automatically.
+
 ## Order
 
 1. Verifier + policy — **done.** Verification delegates to `github.com/coreos/go-oidc`;
