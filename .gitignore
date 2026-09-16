@@ -13,3 +13,18 @@ coverage.out
 *.log
 .DS_Store
 __pycache__/
+
+# Local operator/runtime credentials and generated evidence
+.config/
+.hermes/
+secrets/
+*_secret*
+*_secrets*
+*_credentials*
+*credentials*
+*.pem
+*.key
+*.p12
+*.pfx
+/tmp/
+workforce-logto-provision-evidence.json
