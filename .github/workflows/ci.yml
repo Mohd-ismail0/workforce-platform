@@ -26,10 +26,18 @@ jobs:
           --health-retries 20
 
     env:
+      # The superuser is used ONLY to provision. Everything that runs the
+      # application or its tests uses a dedicated NON-SUPERUSER role, because a
+      # superuser (or any BYPASSRLS role) silently bypasses row-level security -
+      # which would make the cross-organization isolation tests pass for the
+      # wrong reason. FORCE ROW LEVEL SECURITY binds the table owner, not a
+      # superuser, so the runtime role must be an ordinary role that owns the
+      # objects. This mirrors the production split between provisioning and
+      # running the workload.
       PGPASSWORD: postgres
       CI_ADMIN_DB_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres
-      CI_DB_URL: postgres://postgres:postgres@127.0.0.1:5432/workforce_ci
-      CI_MIGRATION_DB_URL: postgres://postgres:postgres@127.0.0.1:5432/workforce_ci
+      CI_APP_DB_URL: postgres://workforce_app:workforce_app@127.0.0.1:5432/workforce_ci
+      CI_MIGRATION_DB_URL: postgres://workforce_app:workforce_app@127.0.0.1:5432/workforce_ci
 
     steps:
       - uses: actions/checkout@v4
@@ -39,11 +47,20 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Create the job database
+      - name: Provision the runtime role and job database
         run: |
-          psql "$CI_ADMIN_DB_URL" -c "CREATE DATABASE workforce_ci;"
-          psql "$CI_DB_URL" -c "SELECT version();" >/dev/null
-          echo "workforce_ci created and reachable"
+          psql "$CI_ADMIN_DB_URL" <<'SQL'
+          CREATE ROLE workforce_app LOGIN PASSWORD 'workforce_app'
+            NOSUPERUSER NOBYPASSRLS NOCREATEROLE CREATEDB;
+          -- The app role OWNS the database (and therefore the public schema in
+          -- PG15+), so it can create tables and trusted extensions
+          -- (pgcrypto, btree_gist) without superuser. CREATEDB lets internal/testdb
+          -- provision one throwaway database per test package.
+          CREATE DATABASE workforce_ci OWNER workforce_app;
+          GRANT CONNECT ON DATABASE postgres TO workforce_app;
+          SQL
+          psql "$CI_APP_DB_URL" -c "SELECT current_user, version();"
+          echo "workforce_ci provisioned for the non-superuser runtime role"
 
       - name: Apply migrations (migration owner)
         id: migrate
@@ -65,9 +82,12 @@ jobs:
           set -o pipefail
           go test -race -count=1 ./... 2>&1 | tee /tmp/test-output.log
         env:
-          DATABASE_URL: ${{ env.CI_DB_URL }}
+          DATABASE_URL: ${{ env.CI_APP_DB_URL }}
           MIGRATION_DATABASE_URL: ${{ env.CI_MIGRATION_DB_URL }}
-          TEST_MASTER_DATABASE_URL: ${{ env.CI_ADMIN_DB_URL }}
+          # The app role (not the superuser) provisions each package's throwaway
+          # database, so those databases are owned by an ordinary role and RLS is
+          # enforced there too. It has CREATEDB for exactly this.
+          TEST_MASTER_DATABASE_URL: ${{ env.CI_APP_DB_URL }}
 
       - name: Surface test failure
         if: failure() && steps.tests.outcome == 'failure'
