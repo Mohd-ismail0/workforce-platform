@@ -1,14 +1,20 @@
 import { useEffect, useState } from "react";
 import { Bot, Cpu, PauseCircle, ShieldAlert, Zap } from "lucide-react";
 import {
+  createAgentFromTemplate,
   getAgentBoard,
   getAgentConfiguration,
   listAgents,
+  listAgentTemplates,
+  publishAgentTemplate,
   type Agent,
   type AgentBoard,
   type AgentConfiguration,
+  type AgentTemplate,
 } from "@/api";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Empty, Panel } from "@/components/ui/panel";
 import { PageHeader } from "@/app/app-shell";
 
@@ -33,15 +39,17 @@ export function AgentsPage() {
   const [agents, setAgents] = useState<Agent[]>([]);
   const [boards, setBoards] = useState<Record<string, AgentBoard>>({});
   const [configs, setConfigs] = useState<Record<string, AgentConfiguration>>({});
+  const [templates, setTemplates] = useState<AgentTemplate[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
-  useEffect(() => {
+  const load = () => {
     let cancelled = false;
-    listAgents()
-      .then(async (a) => {
+    Promise.all([listAgents(), listAgentTemplates().catch(() => [] as AgentTemplate[])])
+      .then(async ([a, tpls]) => {
         if (cancelled) return;
         setAgents(a);
+        setTemplates(tpls);
         // One request per agent. Fine at the scale of a team's agent roster;
         // if that ever stops being true this becomes a single summary endpoint.
         const entries = await Promise.all(
@@ -74,7 +82,9 @@ export function AgentsPage() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  };
+
+  useEffect(load, []);
 
   return (
     <>
@@ -96,6 +106,12 @@ export function AgentsPage() {
             model, but a configured one routes through the gateway.
           </p>
         </div>
+
+        <TemplatePicker
+          templates={templates}
+          onChanged={() => void load()}
+          onError={setError}
+        />
 
         {error ? (
           <Panel className="border-[--color-danger]/40 p-4">
@@ -176,6 +192,13 @@ export function AgentsPage() {
                         Owner <span className="font-mono">{a.owner_id}</span>
                         {b?.tasks.length ? ` · ${b.tasks.length} open task${b.tasks.length === 1 ? "" : "s"}` : ""}
                       </p>
+                      {a.template_version ? (
+                        <p className="mt-0.5 text-[10px] text-[--color-ink-3]">
+                          From a template, pinned to version{" "}
+                          <span className="font-mono">{a.template_version}</span>{" "}
+                          — a newer template version does not change this agent.
+                        </p>
+                      ) : null}
 
                       {(() => {
                         const cfg = configs[a.id];
@@ -244,5 +267,148 @@ export function AgentsPage() {
         )}
       </div>
     </>
+  );
+}
+
+/**
+ * Start an agent from a template.
+ *
+ * A template is the difference between "configure an agent" and "pick one and
+ * turn parts of it off". Only PUBLISHED templates can be adopted: publishing is
+ * the act that makes a template safe to hand to someone, so a half-written one
+ * is never offered. Customization narrows the template's scope; it can never
+ * widen it, and the server refuses a widened request rather than trimming it.
+ */
+function TemplatePicker({
+  templates,
+  onChanged,
+  onError,
+}: {
+  templates: AgentTemplate[];
+  onChanged: () => void;
+  onError: (v: string) => void;
+}) {
+  const [adopting, setAdopting] = useState<string>("");
+  const [name, setName] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const adopt = async () => {
+    setBusy(true);
+    try {
+      await createAgentFromTemplate({ name, template_id: adopting });
+      setName("");
+      setAdopting("");
+      onChanged();
+    } catch (e) {
+      onError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const publish = async (tpl: AgentTemplate) => {
+    setBusy(true);
+    try {
+      await publishAgentTemplate(tpl.id, tpl.revision);
+      onChanged();
+    } catch (e) {
+      onError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!templates.length) {
+    return (
+      <Panel className="p-4">
+        <p className="text-[12px] font-medium">No templates yet</p>
+        <p className="mt-1 text-[11px] leading-relaxed text-[--color-ink-3]">
+          A template names a harness and the scope of work an agent from it may
+          do, so a colleague can start from something reviewed instead of
+          configuring an agent from nothing. Templates are data: they cannot run
+          anything and cannot widen what an operator has granted.
+        </p>
+      </Panel>
+    );
+  }
+
+  return (
+    <Panel className="p-4">
+      <p className="text-[12px] font-medium">Start from a template</p>
+      <p className="mt-1 text-[11px] text-[--color-ink-3]">
+        Adopting a template pins the agent to that version. Customization can
+        narrow its scope, never widen it.
+      </p>
+      <div className="mt-3 space-y-2">
+        {templates.map((tpl) => (
+          <div
+            key={tpl.id}
+            className="flex flex-wrap items-center gap-2 rounded-md border border-[--color-line] px-2.5 py-2"
+          >
+            <span className="text-[11px] font-medium">{tpl.name}</span>
+            <span className="font-mono text-[10px] text-[--color-ink-3]">
+              {tpl.version} · {tpl.harness}
+            </span>
+            <Badge tone={tpl.status === "published" ? "accent" : "neutral"}>
+              {tpl.status}
+            </Badge>
+            {tpl.capabilities.length ? (
+              <span className="text-[10px] text-[--color-ink-3]">
+                scope: {tpl.capabilities.join(", ")}
+              </span>
+            ) : (
+              <span className="text-[10px] text-[--color-ink-3]">
+                no capabilities — it may prepare, nothing more
+              </span>
+            )}
+
+            <span className="ms-auto flex items-center gap-2">
+              {tpl.status === "draft" ? (
+                <>
+                  <span className="text-[10px] text-[--color-ink-3]">
+                    not selectable until published
+                  </span>
+                  <Button size="sm" variant="ghost" disabled={busy} onClick={() => void publish(tpl)}>
+                    Publish
+                  </Button>
+                </>
+              ) : tpl.status === "published" ? (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  disabled={busy}
+                  onClick={() => setAdopting(adopting === tpl.id ? "" : tpl.id)}
+                >
+                  Adopt
+                </Button>
+              ) : null}
+            </span>
+
+            {adopting === tpl.id ? (
+              <div className="mt-1 flex w-full flex-wrap items-center gap-2">
+                <Input
+                  autoFocus
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  placeholder="Name this agent"
+                  className="max-w-xs"
+                />
+                <Button
+                  size="sm"
+                  variant="accent"
+                  disabled={busy || !name.trim()}
+                  onClick={() => void adopt()}
+                >
+                  Create agent
+                </Button>
+                <Button size="sm" variant="ghost" onClick={() => setAdopting("")}>
+                  Cancel
+                </Button>
+              </div>
+            ) : null}
+          </div>
+        ))}
+      </div>
+    </Panel>
   );
 }

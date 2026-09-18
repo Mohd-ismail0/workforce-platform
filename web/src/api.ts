@@ -105,6 +105,11 @@ export type Agent = {
   owner_id: string;
   capabilities: string[] | null;
   created_at: string;
+  /** Which template version this agent came from; empty if configured directly. */
+  template_id?: string;
+  template_version?: string;
+  /** Declarative guidance. Data, never executed. */
+  instructions?: string;
 };
 
 /**
@@ -477,6 +482,48 @@ export const checkCapabilities = (harness: string, capabilities: string[]) =>
     method: "POST",
     body: JSON.stringify({ harness, capabilities }),
   });
+
+/**
+ * A versioned, declarative starting point for an agent. It names a harness and
+ * the SCOPE an agent created from it may use; customization can narrow that
+ * scope, never widen it.
+ */
+export type AgentTemplate = {
+  id: string;
+  name: string;
+  version: string;
+  harness: string;
+  description: string;
+  capabilities: string[];
+  instructions: string;
+  status: "draft" | "published" | "retired";
+  created_by: string;
+  revision: number;
+  created_at: string;
+};
+export const listAgentTemplates = () => list<AgentTemplate>("/templates");
+export const createAgentTemplate = (body: {
+  name: string;
+  version: string;
+  harness: string;
+  description?: string;
+  capabilities?: string[];
+  instructions?: string;
+}) =>
+  api<AgentTemplate>("/templates", { method: "POST", body: JSON.stringify(body) });
+export const publishAgentTemplate = (id: string, expectedVersion: number) =>
+  api<AgentTemplate>(`/templates/${id}/publish`, {
+    method: "POST",
+    body: JSON.stringify({ expected_version: expectedVersion }),
+  });
+/** Adopt a template, optionally narrowing its capability scope. */
+export const createAgentFromTemplate = (body: {
+  name: string;
+  template_id: string;
+  capabilities?: string[];
+  instructions?: string;
+}) =>
+  api<Agent>("/agents/from-template", { method: "POST", body: JSON.stringify(body) });
 export const listPositions = () => list<Position>("/positions");
 
 /**

@@ -9,7 +9,9 @@ import (
 func (s *Store) ListAgents(ctx context.Context, org string) ([]Agent, error) {
 	out := []Agent{}
 	err := s.WithOrg(ctx, org, func(tx pgx.Tx) error {
-		rows, e := tx.Query(ctx, "SELECT id,org_id,name,harness,status,owner_id,capabilities FROM agents ORDER BY name,id")
+		rows, e := tx.Query(ctx, `SELECT id,org_id,name,harness,status,owner_id,capabilities,
+		                                 coalesce(template_id,''),coalesce(template_version,''),instructions
+		                            FROM agents ORDER BY name,id`)
 		if e != nil {
 			return e
 		}
@@ -17,7 +19,8 @@ func (s *Store) ListAgents(ctx context.Context, org string) ([]Agent, error) {
 		for rows.Next() {
 			var a Agent
 			var raw []byte
-			if e = rows.Scan(&a.ID, &a.OrgID, &a.Name, &a.Harness, &a.Status, &a.OwnerID, &raw); e != nil {
+			if e = rows.Scan(&a.ID, &a.OrgID, &a.Name, &a.Harness, &a.Status, &a.OwnerID, &raw,
+				&a.TemplateID, &a.TemplateVersion, &a.Instructions); e != nil {
 				return e
 			}
 			if e = json.Unmarshal(raw, &a.Capabilities); e != nil {

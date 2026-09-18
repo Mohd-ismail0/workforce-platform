@@ -378,6 +378,66 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		// another's board.
 		x, e := s.store.WorkBoard(ctx, id.OrgID, id.ID)
 		respond(w, x, e)
+	case path == "/templates" && r.Method == "GET":
+		x, e := s.store.ListAgentTemplates(ctx, id.OrgID)
+		respond(w, x, e)
+	case path == "/templates" && r.Method == "POST":
+		var q struct {
+			Name         string   `json:"name"`
+			Version      string   `json:"version"`
+			Harness      string   `json:"harness"`
+			Description  string   `json:"description"`
+			Capabilities []string `json:"capabilities"`
+			Instructions string   `json:"instructions"`
+		}
+		if decode(r, &q) != nil || strings.TrimSpace(q.Name) == "" ||
+			strings.TrimSpace(q.Version) == "" || strings.TrimSpace(q.Harness) == "" {
+			failCode(w, 422, "invalid_request", "name, version and harness are required")
+			return
+		}
+		x, e := s.store.CreateAgentTemplate(ctx, id.OrgID, id.ID, q.Name, q.Version, q.Harness,
+			q.Description, q.Capabilities, q.Instructions)
+		if e != nil {
+			fail(w, e)
+			return
+		}
+		jsonWrite(w, 201, x)
+	case strings.HasPrefix(path, "/templates/") && strings.HasSuffix(path, "/publish") && r.Method == "POST":
+		p := strings.Split(strings.Trim(path, "/"), "/")
+		if len(p) != 3 {
+			failCode(w, 404, "not_found", "not found")
+			return
+		}
+		var q struct {
+			ExpectedVersion int64 `json:"expected_version"`
+		}
+		if decode(r, &q) != nil || q.ExpectedVersion < 1 {
+			failCode(w, 422, "invalid_request", "expected_version is required")
+			return
+		}
+		x, e := s.store.PublishAgentTemplate(ctx, id.OrgID, id.ID, p[1], q.ExpectedVersion)
+		if e != nil {
+			fail(w, e)
+			return
+		}
+		jsonWrite(w, 200, x)
+	case path == "/agents/from-template" && r.Method == "POST":
+		var q struct {
+			Name         string   `json:"name"`
+			TemplateID   string   `json:"template_id"`
+			Capabilities []string `json:"capabilities"`
+			Instructions string   `json:"instructions"`
+		}
+		if decode(r, &q) != nil || strings.TrimSpace(q.Name) == "" || q.TemplateID == "" {
+			failCode(w, 422, "invalid_request", "name and template_id are required")
+			return
+		}
+		x, e := s.store.CreateAgentFromTemplate(ctx, id.OrgID, id.ID, q.Name, q.TemplateID, q.Capabilities, q.Instructions)
+		if e != nil {
+			fail(w, e)
+			return
+		}
+		jsonWrite(w, 201, x)
 	case path == "/people" && r.Method == "GET":
 		x, e := s.store.ListPeople(ctx, id.OrgID)
 		respond(w, x, e)

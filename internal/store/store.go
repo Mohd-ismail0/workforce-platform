@@ -97,6 +97,13 @@ type Agent struct {
 	Status       string   `json:"status"`
 	OwnerID      string   `json:"owner_id"`
 	Capabilities []string `json:"capabilities"`
+	// TemplateID/TemplateVersion record which template version this agent came
+	// from, so its configuration is attributable rather than merely similar. Empty
+	// for an agent configured from nothing.
+	TemplateID      string `json:"template_id"`
+	TemplateVersion string `json:"template_version"`
+	// Instructions are declarative guidance. They are data, never executed.
+	Instructions string `json:"instructions"`
 }
 type Proposal struct {
 	ID            string                 `json:"id"`
