@@ -49,6 +49,21 @@ type bff struct {
 	secureCookies bool
 	// postLogoutURL is where the provider returns the browser after signing out.
 	postLogoutURL string
+	// uiOrigin is where the browser lands after a completed login. Empty keeps the browser on
+	// the API origin.
+	uiOrigin string
+}
+
+// redirectTarget resolves a safe relative path onto the configured UI origin.
+//
+// The path is already validated by SafeReturnTo (same-origin path only), so this only decides
+// which host serves it. With no UI origin configured the path is returned unchanged, which is
+// the previous behaviour for a deployment that serves the interface from the API origin.
+func (b *bff) redirectTarget(path string) string {
+	if b.uiOrigin == "" {
+		return path
+	}
+	return b.uiOrigin + path
 }
 
 // authError renders a failure to the browser without revealing which check failed.
@@ -57,6 +72,35 @@ type bff struct {
 // deactivated or merely unlucky turns the endpoint into a probe oracle.
 func (s *Server) authError(w http.ResponseWriter, reason string) {
 	log.Printf("auth: refusing request: %s", reason)
+	http.Error(w, "authentication failed", http.StatusUnauthorized)
+}
+
+// authErrorCodes is the fixed set of reasons the UI is allowed to receive. Anything not in
+// this set is logged only.
+//
+// A coarse code is still needed for the interactive flow: "authentication failed" cannot
+// distinguish "you have no account provisioned here yet" from "the provider is misconfigured",
+// and those need different words in front of a human. The code carries no detail about which
+// subject or account was involved, so it is not a probe oracle.
+var authErrorCodes = map[string]bool{
+	"unlinked":         true,
+	"login_failed":     true,
+	"login_expired":    true,
+	"provider_refused": true,
+	"session_unusable": true,
+}
+
+// authRedirectError reports an interactive login failure.
+//
+// It returns the browser to the user interface when one is configured, because the callback is
+// served by the API and renders no pages: leaving a colleague on a bare 401 body after a
+// failed sign-in is both confusing and easy to mistake for an API fault.
+func (s *Server) authRedirectError(w http.ResponseWriter, r *http.Request, code, reason string) {
+	log.Printf("auth: refusing request: %s", reason)
+	if s.bff != nil && s.bff.uiOrigin != "" && authErrorCodes[code] {
+		http.Redirect(w, r, s.bff.uiOrigin+"/?auth_error="+code, http.StatusFound)
+		return
+	}
 	http.Error(w, "authentication failed", http.StatusUnauthorized)
 }
 
@@ -121,12 +165,12 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 	// The provider may report a refusal instead of a code; that is a normal outcome and must
 	// not be treated as a server error.
 	if e := q.Get("error"); e != "" {
-		s.authError(w, "provider refused: "+e)
+		s.authRedirectError(w, r, "provider_refused", "provider refused: "+e)
 		return
 	}
 	code, state := q.Get("code"), q.Get("state")
 	if code == "" || state == "" {
-		s.authError(w, "callback is missing code or state")
+		s.authRedirectError(w, r, "login_failed", "callback is missing code or state")
 		return
 	}
 
@@ -135,13 +179,13 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 	// session.
 	tx, err := s.bff.store.ConsumeLoginTransaction(r.Context(), platform.HashToken(state))
 	if err != nil {
-		s.authError(w, "login transaction unusable")
+		s.authRedirectError(w, r, "login_expired", "login transaction unusable")
 		return
 	}
 
 	claims, err := s.bff.oauth.Exchange(r.Context(), code, tx.Verifier, tx.Nonce)
 	if err != nil {
-		s.authError(w, "code exchange or id token verification failed")
+		s.authRedirectError(w, r, "login_failed", "code exchange or id token verification failed")
 		return
 	}
 
@@ -149,23 +193,26 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 	// refused here, and there is no auto-provisioning: authenticating is not an entitlement.
 	identity, err := s.bff.store.ResolveOIDCIdentity(r.Context(), claims.Issuer, claims.Subject)
 	if err != nil {
-		s.authError(w, "no platform identity is linked to this account")
+		// Authenticating successfully is not the same as being entitled to act. This is the
+		// expected outcome for a colleague who has not been provisioned yet, so it gets its own
+		// code and an explanatory screen rather than a generic failure.
+		s.authRedirectError(w, r, "unlinked", "no platform identity is linked to this account")
 		return
 	}
 	if identity.OrgID == "" {
-		s.authError(w, "identity has no organisation")
+		s.authRedirectError(w, r, "unlinked", "identity has no organisation")
 		return
 	}
 
 	csrf, err := platform.NewOpaqueToken()
 	if err != nil {
-		s.authError(w, "randomness unavailable")
+		s.authRedirectError(w, r, "login_failed", "randomness unavailable")
 		return
 	}
 	rawSession, err := s.bff.store.CreateSession(r.Context(), identity.OrgID, identity.ID,
 		claims.Issuer, claims.Subject, csrf, s.bff.oauth.SessionTTL())
 	if err != nil {
-		s.authError(w, "could not create a session")
+		s.authRedirectError(w, r, "login_failed", "could not create a session")
 		return
 	}
 
@@ -174,7 +221,10 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 	// read it and echo it back in a header, which is what proves the request was deliberate.
 	s.setCSRFCookie(w, csrf, int(s.bff.oauth.SessionTTL().Seconds()))
 
-	http.Redirect(w, r, platform.SafeReturnTo(tx.ReturnTo), http.StatusFound)
+	// Land the browser on the user interface, not on the callback's own origin. The callback
+	// is served by the API, which renders no pages, so redirecting to a bare path here would
+	// drop a successfully authenticated colleague onto a blank route.
+	http.Redirect(w, r, s.bff.redirectTarget(platform.SafeReturnTo(tx.ReturnTo)), http.StatusFound)
 }
 
 // handleLogout ends the session.

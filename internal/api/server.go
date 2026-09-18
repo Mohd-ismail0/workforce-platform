@@ -49,6 +49,7 @@ func New(c platform.Config, st *store.Store) *Server {
 					store:         st,
 					secureCookies: c.Browser.CookieSecure,
 					postLogoutURL: c.Browser.PostLogoutURL,
+					uiOrigin:      c.Browser.UIOrigin,
 				}
 			}
 		}
@@ -335,6 +336,10 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 	case path == "/handoffs" && r.Method == "GET":
 		x, e := s.store.ListHandoffs(ctx, id.OrgID, id.ID)
 		respond(w, x, e)
+	case path == "/identity/links":
+		s.handleIdentityLinks(w, r, id)
+	case path == "/identity/links/unlink":
+		s.handleIdentityUnlink(w, r, id)
 	case path == "/receipts" && r.Method == "GET":
 		x, e := s.store.ListReceipts(ctx, id.OrgID)
 		respond(w, x, e)

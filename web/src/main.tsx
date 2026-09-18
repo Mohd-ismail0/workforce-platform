@@ -5,11 +5,14 @@ import {
   api,
   canApprove,
   createHandoff,
+  getSession,
   getToken,
   list,
   listHandoffs,
   listRegistryReleases,
   listGates,
+  loginUrl,
+  logout,
   respondToGate,
   Gate,
   listRuns,
@@ -62,21 +65,95 @@ function App() {
   const [error, setError] = useState("");
   const [token, setTok] = useState(getToken());
   const [loading, setLoading] = useState(true);
+  // authMode is unknown until the backend has been asked. "session" means the BFF browser flow
+  // is configured (OIDC); "local" means /auth/session refused because it is not configured.
+  // The distinction matters: showing a token form in a deployment that uses real sign-in would
+  // invite a shared secret as a credential.
+  const [authMode, setAuthMode] = useState<"unknown" | "session" | "local">("unknown");
+  const [signedIn, setSignedIn] = useState(false);
+  const [authError, setAuthError] = useState("");
+
   useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const code = params.get("auth_error");
+    if (code) {
+      setAuthError(code);
+      // Strip it so a reload does not keep re-showing a failure the user already read.
+      window.history.replaceState({}, "", window.location.pathname);
+    }
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
     setLoading(true);
     setMe(undefined);
-    if (!token) {
-      setLoading(false);
-      return;
-    }
+    // Ask the BFF FIRST. In OIDC mode the credential is an HttpOnly cookie the page cannot
+    // read, so there is no token to look for and the token form must never be the default.
+    getSession()
+      .then((s) => {
+        if (cancelled) return;
+        if (s === null) {
+          setAuthMode("local");
+          return;
+        }
+        setAuthMode("session");
+        if (s.authenticated && s.identity) {
+          setSignedIn(true);
+          setMe(s.identity);
+          return;
+        }
+        setSignedIn(false);
+      })
+      .catch(() => {
+        if (!cancelled) setAuthMode("local");
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Local development mode still requires an explicit token before /me can be called.
+  useEffect(() => {
+    if (authMode !== "local" || !token) return;
+    let cancelled = false;
+    setLoading(true);
     api<Me>("/me")
-      .then(setMe)
-      .catch((e) => setError(e.message))
-      .finally(() => setLoading(false));
-  }, [token]);
+      .then((v) => {
+        if (!cancelled) setMe(v);
+      })
+      .catch((e) => {
+        if (!cancelled) setError(e.message);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [authMode, token]);
+
   if (loading)
-    return <div className="center">Connecting to local control plane…</div>;
-  if (!me) return <Login token={token} setTok={setTok} error={error} />;
+    return <div className="center">Connecting to the control plane…</div>;
+
+  if (!me) {
+    if (authMode === "session") {
+      return (
+        <SignIn
+          signedIn={signedIn}
+          error={authError}
+          onSignIn={() => {
+            // A full navigation, not a fetch: the provider must set its own cookies.
+            window.location.href = loginUrl("/");
+          }}
+        />
+      );
+    }
+    return <Login token={token} setTok={setTok} error={error} />;
+  }
+
   return (
     <Shell
       me={me}
@@ -85,9 +162,18 @@ function App() {
       error={error}
       setError={setError}
       logout={() => {
+        setError("");
+        if (authMode === "session") {
+          // For a cookie session, logging out must end it server-side. Clearing a client
+          // variable would leave the cookie in place and the user still signed in.
+          void logout().then((url) => {
+            window.location.href = url || "/";
+          });
+          return;
+        }
         setToken("");
         setTok("");
-        setError("");
+        setMe(undefined);
       }}
     />
   );
@@ -175,6 +261,56 @@ export function HandoffForms({
   );
 }
 
+export function SignIn({
+  signedIn,
+  error,
+  onSignIn,
+}: {
+  signedIn: boolean;
+  error: string;
+  onSignIn: () => void;
+}) {
+  // Coarse, fixed wording per reason. The code never identifies which account was involved,
+  // so it cannot be used to probe whether a given subject is provisioned.
+  const messages: Record<string, string> = {
+    unlinked:
+      "You signed in successfully, but no platform identity is linked to this account yet. An administrator has to provision access — it is not granted automatically on first sign-in.",
+    login_failed:
+      "The sign-in could not be completed. Try again; if it keeps failing an administrator should check the identity provider configuration.",
+    login_expired: "That sign-in attempt expired before it finished. Start again.",
+    provider_refused: "The identity provider refused the sign-in request.",
+    session_unusable: "Your session is no longer valid. Sign in again to continue.",
+  };
+  return (
+    <main className="login">
+      <div className="login-card">
+        <div className="brand-mark">W</div>
+        <p className="eyebrow">WORKFORCE / SIGN IN</p>
+        <h1>Sign in to the control room</h1>
+        <p className="muted">
+          Sign-in is handled by your organization&apos;s identity provider. This application
+          never sees or stores your password.
+        </p>
+        {error && (
+          <div className="alert error">{messages[error] || "Sign-in failed."}</div>
+        )}
+        {signedIn && !error && (
+          <div className="alert error">
+            Your session ended. Sign in again to continue.
+          </div>
+        )}
+        <button className="primary" type="button" onClick={onSignIn}>
+          Sign in with SSO
+        </button>
+        <small>
+          Access is not granted by signing in. An administrator provisions each person
+          explicitly, and actions are recorded against that identity.
+        </small>
+      </div>
+    </main>
+  );
+}
+
 export function Login({
   token,
   setTok,
@@ -213,7 +349,10 @@ export function Login({
         <button className="primary" type="submit">
           Connect
         </button>
-        <small>Tokens are stored in sessionStorage only.</small>
+        <small>
+          Development identities only — this form is never shown when real sign-in is
+          configured. Tokens are stored in sessionStorage only.
+        </small>
       </form>
     </main>
   );

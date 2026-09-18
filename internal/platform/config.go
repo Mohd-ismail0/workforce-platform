@@ -38,6 +38,11 @@ type BrowserConfig struct {
 	ClientID     string
 	ClientSecret string
 	RedirectURL  string
+	// UIOrigin is where the browser is sent after a completed login. It is required in
+	// practice: the callback lands on the API origin, which serves no user interface, so
+	// without this the user would finish authenticating and arrive at a blank API route.
+	// Empty means no redirection (the browser stays on the API origin).
+	UIOrigin string
 	// PostLogoutURL is where the provider returns the browser after an end-session call.
 	PostLogoutURL string
 	// Cloudflare Access service-token headers for the protected issuer. They are held only
@@ -115,9 +120,19 @@ func LoadConfig() (Config, error) {
 			ClientSecret:       strings.TrimSpace(os.Getenv("WORKFORCE_OIDC_CLIENT_SECRET")),
 			RedirectURL:        strings.TrimSpace(os.Getenv("WORKFORCE_OIDC_REDIRECT_URL")),
 			PostLogoutURL:      strings.TrimSpace(os.Getenv("WORKFORCE_OIDC_POST_LOGOUT_URL")),
+			UIOrigin:           strings.TrimRight(strings.TrimSpace(os.Getenv("WORKFORCE_UI_ORIGIN")), "/"),
 			AccessClientID:     strings.TrimSpace(os.Getenv("WORKFORCE_LOGTO_CF_ACCESS_CLIENT_ID")),
 			AccessClientSecret: strings.TrimSpace(os.Getenv("WORKFORCE_LOGTO_CF_ACCESS_CLIENT_SECRET")),
 			CookieSecure:       cookieSecureFromEnv(),
+		}
+		// An unusable UI origin is refused at startup rather than producing a redirect to a
+		// malformed URL after a successful login, which is both confusing and a way to point
+		// freshly issued sessions at an unintended host.
+		if c.Browser.UIOrigin != "" && !strings.HasPrefix(c.Browser.UIOrigin, "http://") && !strings.HasPrefix(c.Browser.UIOrigin, "https://") {
+			return Config{}, errors.New("WORKFORCE_UI_ORIGIN must be an absolute http(s) origin")
+		}
+		if env == "production" && strings.HasPrefix(c.Browser.UIOrigin, "http://") {
+			return Config{}, errors.New("production requires an https WORKFORCE_UI_ORIGIN")
 		}
 		// A plaintext session cookie in production would let anyone on the path read a
 		// credential that grants the whole account. Refused at startup rather than warned

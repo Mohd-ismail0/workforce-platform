@@ -159,6 +159,27 @@ func (s *Store) ReadSession(ctx context.Context, rawToken string) (Session, plat
 		return Session{}, platform.Identity{}, ErrSessionInvalid
 	}
 
+	// The link is what authorised this session, so it is re-checked here rather than only at
+	// login. Without this, unlinking an external account would leave every session it created
+	// fully usable until the cookie expired — "access removed" that did not remove access.
+	//
+	// The rule is deliberately conditional. A row in identity_links means this (issuer,
+	// subject) was linked at some point, and it must still be active, in this org, and point
+	// at this principal. The absence of any row identifies a session that never came from the
+	// browser flow (local dev and test fixtures); those cannot be created through
+	// /auth/callback, which resolves a link before it will mint a session.
+	var linkActive bool
+	var linkOrg, linkPrincipal string
+	err = s.Pool.QueryRow(ctx, `
+		SELECT active, org_id, principal_id FROM identity_links
+		 WHERE issuer = $1 AND subject = $2`, sess.Issuer, sess.Subject).Scan(&linkActive, &linkOrg, &linkPrincipal)
+	switch {
+	case err == nil && (!linkActive || linkOrg != sess.OrgID || linkPrincipal != sess.PrincipalID):
+		return Session{}, platform.Identity{}, ErrSessionInvalid
+	case err != nil && !errors.Is(err, pgx.ErrNoRows):
+		return Session{}, platform.Identity{}, err
+	}
+
 	// Best-effort liveness stamp; a failure here must not fail an otherwise valid request.
 	_, _ = s.Pool.Exec(ctx,
 		`UPDATE sessions SET last_seen_at = clock_timestamp() WHERE id_hash = $1`,

@@ -24,7 +24,7 @@ This is a partial working platform foundation, not completion of the full build 
 
 - **Durable pause/resume is state-machine continuation, not memory serialization.** A parked run persists its question and the human's answer, then re-executes with those inputs. The harness process itself is not frozen and resumed, so in-memory harness state does not survive a stop.
 - Claim recovery uses a two-minute lease. A worker that dies mid-run is recovered by the next attempt after the lease expires; a healthy worker is never preempted while its lease is valid.
-- **Harness execution is a simulator.** The only runner is an in-process, deterministic simulator that prepares a proposal. It does not launch a real coding harness, does not run external commands and does not call a network or model provider. Registering a harness release does not make that harness executable.
+- **Harness execution: two runners exist, and the distinction matters.** The default is an in-process, deterministic **simulator** that prepares a proposal and calls no network or model. Separately, `internal/runner` can launch any operator-configured command (`WORKFORCE_RUNNER_CLI_*`) as a real subprocess. Registering a harness release does not by itself make a real harness executable, and no harness binary or model credential is provisioned on this host by default.
 - Agent runs are gated on an **active harness release** in the registry; without one a run is refused with `no_active_harness`. A quarantined release never unlocks runs, and only an operator may promote one.
 - Local opaque-token development authentication only; OIDC/OpenFGA not implemented. Coarse organization visibility is not resource-level/matrix organization authorization.
 - Agent-run execution seam: `agent_runs` lifecycle (queued → running → succeeded/failed) dispatched through River, where the runner may only *prepare* a proposal. A run never endorses, approves or executes; its output lands in the normal review path.
@@ -75,9 +75,23 @@ Verified by execution, not assertion:
 
 **Not established, and not to be implied:**
 
-- A live Logto Management API credential was used successfully in read-only verification.
-  The existing operator M2M app is `spg9p4spdwoip4dfi51wg`; its credential remains
-  operator-only and is never given to the workforce runtime.
+- **Identity onboarding is implemented and fixture-tested, but no human has completed a login.**
+  - A local operator command (`-bootstrap-identity`) creates and links the FIRST administrator.
+    It exists because the first administrator has no linked account and therefore nothing to
+    authenticate with; it is a CLI command rather than an HTTP route so it cannot be an
+    anonymous escalation path. It requires the exact `(issuer, subject)` of an
+    already-authenticated identity, never links by email, and records the human operator as the
+    actor instead of inventing an authenticated administrator.
+  - Subsequent onboarding goes through authenticated administrator routes
+    (`GET/POST /identity/links`, `POST /identity/links/unlink`), whose authority is read from
+    the principal row on every request. A non-administrator is refused.
+  - A session is invalidated when the identity link that authorised it is removed, even though
+    the principal itself stays active — otherwise "remove access" would not remove access until
+    the cookie expired. Unlinking also ends the identity's sessions immediately.
+  - Unlinking the last external account of an active administrator is refused, because that
+    would remove the organization's only authenticated path into onboarding.
+  - No auto-provisioning on first sign-in and no email-based linking: email is reassignable,
+    so linking on it would be an account-takeover primitive.
 - Logto provisioning **has been applied and read back successfully**: resource
   `e810t1oshvoeefp00d7n5` with indicator `https://workforce.internal/api` and scopes
   `read:work`, `write:work`, `approve:work`; confidential BFF app
@@ -87,12 +101,17 @@ Verified by execution, not assertion:
 - The BFF browser foundation is implemented and tested: authorization-code + PKCE,
   single-use state/nonce transactions, hashed server-side sessions, revocation,
   offboarding checks, HttpOnly/Secure/SameSite cookies and CSRF protection. Migration 012
-  applies repeatably. A real human browser login has not yet been exercised.
+  applies repeatably. **A real human browser login has not yet been exercised.**
+- The UI now asks the BFF for session state first and shows "Sign in with SSO" when the browser
+  flow is configured; the token form appears only when `/auth/session` refuses because the
+  deployment is in local mode. The credential is an HttpOnly cookie the page cannot read; no
+  access token, refresh token or client secret is ever placed in browser storage.
 - Authentication is not authorization. Org, role, ownership, approval jurisdiction and
   separation of duties come from kernel rows, never from a token claim. A token proves
   *who*, never *what*.
-- No auto-provisioning on first login and no email-based linking: email is reassignable, so
-  linking on it would be an account-takeover primitive.
+- **The two-human approval experience is not proven by a single login.** Another real user must
+  be onboarded before the requester/approver separation can be demonstrated with real people
+  rather than fixtures.
 
 Two earlier claims are corrected here. Sending mail is **not reversible** — it is narrow
 and allowlistable, which is weaker. A dedicated unprivileged UID is **not** sufficient

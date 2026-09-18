@@ -161,12 +161,76 @@ export const setToken = (token: string) =>
   token
     ? sessionStorage.setItem(tokenKey, token)
     : sessionStorage.removeItem(tokenKey);
+
+// ---------------------------------------------------------------------------
+// Browser session (BFF) support.
+//
+// In OIDC mode the browser holds NO token: the credential is an HttpOnly cookie the page
+// cannot read, and every request is authorised server-side from the database. Nothing here
+// ever stores an access token, refresh token or client secret -- doing so would move the
+// credential back into reach of any script on the page.
+//
+// The CSRF token is the one value that must be readable by the client, because it has to be
+// echoed back in a header; that is what proves a state-changing request was deliberate rather
+// than something the browser attached a cookie to on its own.
+// ---------------------------------------------------------------------------
+
+export type SessionState = {
+  authenticated: boolean;
+  identity?: Me;
+  csrf_token?: string;
+  expires_at?: string;
+};
+
+let csrfToken = "";
+
+/** Ask the BFF who we are. Returns null when the browser flow is not configured at all. */
+export async function getSession(): Promise<SessionState | null> {
+  const response = await fetch("/auth/session", {
+    credentials: "same-origin",
+    headers: { Accept: "application/json" },
+  });
+  // 401 means the endpoint refused because the browser flow is not configured (local mode).
+  // That is a different fact from "configured but nobody is signed in", which is 200 with
+  // authenticated:false, and the UI must not confuse the two.
+  if (response.status === 401) return null;
+  if (!response.ok) return null;
+  const body = (await response.json().catch(() => null)) as SessionState | null;
+  if (!body) return null;
+  csrfToken = body.csrf_token || "";
+  return body;
+}
+
+/** Absolute URL that starts the interactive login. A full navigation, not a fetch. */
+export const loginUrl = (returnTo = "/") =>
+  `/auth/login?return_to=${encodeURIComponent(returnTo)}`;
+
+export async function logout(): Promise<string> {
+  const response = await fetch("/auth/logout", {
+    method: "POST",
+    credentials: "same-origin",
+    headers: {
+      "Content-Type": "application/json",
+      ...(csrfToken ? { "X-CSRF-Token": csrfToken } : {}),
+    },
+    body: JSON.stringify({}),
+  });
+  const body = await response.json().catch(() => null);
+  csrfToken = "";
+  setToken("");
+  return body?.logout_url || "";
+}
+
 export async function api<T>(path: string, init: RequestInit = {}) {
   const response = await fetch(`/api/v1${path}`, {
     ...init,
+    credentials: "same-origin",
     headers: {
       "Content-Type": "application/json",
       ...(getToken() ? { Authorization: `Bearer ${getToken()}` } : {}),
+      // Sent only when a session cookie is in play; an explicit bearer token needs no CSRF
+      // proof because the browser never attaches one by itself.
+      ...(!getToken() && csrfToken ? { "X-CSRF-Token": csrfToken } : {}),
       ...(init.headers || {}),
     },
   });
