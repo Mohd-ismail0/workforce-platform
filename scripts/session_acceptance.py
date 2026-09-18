@@ -99,6 +99,37 @@ JS = r"""
   // 3. an authorized read still works with the cookie alone.
   out.me = await j(await fetch('/api/v1/me', {credentials:'same-origin'}));
 
+  // 3b. a REAL cookie-authenticated mutation, and the same one refused without CSRF.
+  //
+  // The 403/404 probe above proves the CSRF gate is wired, but a routed request is not the
+  // same as one that actually writes. This creates a project, which is a harmless, visible
+  // state change that proves the whole path: cookie -> CSRF -> kernel -> committed row.
+  // Gated like logout because it writes; the name is unique so a re-run cannot collide.
+  if (__WITH_MUTATION__) {
+    const name = 'csrf-acceptance-' + Math.random().toString(36).slice(2, 10);
+    const body = JSON.stringify({ name, description: 'written by session_acceptance.py' });
+    out.mutation_without_csrf = await j(await fetch('/api/v1/projects', {
+      method:'POST', credentials:'same-origin',
+      headers:{'Content-Type':'application/json'}, body
+    }));
+    const created = await fetch('/api/v1/projects', {
+      method:'POST', credentials:'same-origin',
+      headers:{'Content-Type':'application/json', 'X-CSRF-Token': csrf}, body
+    });
+    out.mutation_status = created.status;
+    let doc = null;
+    try { doc = await created.json(); } catch (e) {}
+    out.mutation_created = !!(doc && doc.id);
+    out.mutation_name = name;
+    // Confirm it is actually persisted and readable back, not just echoed.
+    const listed = await fetch('/api/v1/projects', {credentials:'same-origin'});
+    let items = [];
+    try { const l = await listed.json(); items = (l && l.items) || []; } catch (e) {}
+    out.mutation_visible = items.some(p => p && p.name === name);
+  } else {
+    out.mutation_skipped = true;
+  }
+
   // 4. logout, then prove access is actually gone. Gated because it ends a real session;
   //    running it unconditionally signs the operator out every time this script is used.
   if (!__WITH_LOGOUT__) {
@@ -125,11 +156,15 @@ JS = r"""
 def main():
     """Run the acceptance checks.
 
-    The logout leg is OPT-IN (`--with-logout`). It ends a real session, so running it by
-    default would sign the operator out of their own browser every time someone re-ran this
-    script — which is exactly what happened the first time it was used.
+    Two legs are OPT-IN because they change real state:
+      --with-mutation  creates a project, proving cookie -> CSRF -> kernel -> committed row
+      --with-logout    ends the session, proving logout actually removes access
+
+    Gating them matters: the logout leg signed the operator out of their own browser the first
+    time this script was run, and an unconditional write would litter the workspace.
     """
     with_logout = "--with-logout" in sys.argv
+    with_mutation = "--with-mutation" in sys.argv
     c = C(pick_page()["webSocketDebuggerUrl"])
     try:
         c.call("Network.enable")
@@ -140,8 +175,9 @@ def main():
         c.call("Page.navigate", url=APP)
         time.sleep(4)
         print("=== reload preserved the login? ===")
-        res = json.loads(c.ev(JS.replace("__WITH_LOGOUT__", "true" if with_logout else "false"),
-                              await_promise=True))
+        js = (JS.replace("__WITH_LOGOUT__", "true" if with_logout else "false")
+                .replace("__WITH_MUTATION__", "true" if with_mutation else "false"))
+        res = json.loads(c.ev(js, await_promise=True))
         print("  session status      :", res.get("session_status"),
               " authenticated:", res.get("authenticated"),
               " identity:", res.get("identity_id"))
@@ -153,6 +189,15 @@ def main():
         print()
         print("=== authorized read ===")
         print("  GET /api/v1/me      :", res.get("me"))
+        print()
+        print("=== real mutation (cookie + CSRF) ===")
+        if res.get("mutation_skipped"):
+            print("  SKIPPED (pass --with-mutation to run it; it writes a project)")
+        else:
+            print("  POST /projects w/o CSRF:", res.get("mutation_without_csrf"))
+            print("  POST /projects w/  CSRF: status", res.get("mutation_status"),
+                  " created:", res.get("mutation_created"),
+                  " visible on re-read:", res.get("mutation_visible"))
         print()
         print("=== logout invalidates access ===")
         if res.get("logout_skipped"):
@@ -177,6 +222,15 @@ def main():
              res.get("with_csrf", {}).get("status") == 404),
             ("authorized read succeeded", res.get("me", {}).get("status") == 200),
         ]
+        if not res.get("mutation_skipped"):
+            checks += [
+                ("real mutation without CSRF refused",
+                 res.get("mutation_without_csrf", {}).get("status") == 403),
+                ("real mutation with CSRF created a row",
+                 res.get("mutation_status") == 201 and res.get("mutation_created") is True),
+                ("created row is persisted (read back)",
+                 res.get("mutation_visible") is True),
+            ]
         if not res.get("logout_skipped"):
             checks += [
                 ("logout returned 200", res.get("logout_status") == 200),
