@@ -389,6 +389,59 @@ export const cancelHandoff = (handoffId: string, reason: string) =>
     method: "POST",
     body: JSON.stringify({ reason }),
   });
+
+/** A directory entry: enough to name someone in a structure view. */
+export type Person = {
+  id: string;
+  name: string;
+  role: Role;
+  active: boolean;
+};
+/** A node in the organization structure. A holderless position is a vacancy. */
+export type Position = {
+  id: string;
+  name: string;
+  parent_id: string;
+  version: number;
+  created_at: string;
+};
+/**
+ * An effective-dated fact about a person. `valid_from`/`valid_to` are a
+ * half-open period; `valid_to` is empty while it is still in effect.
+ */
+export type Relationship = {
+  id: string;
+  subject_id: string;
+  kind: "reports_to" | "member_of" | "covers_for";
+  object_id: string;
+  valid_from: string;
+  valid_to: string;
+  created_by: string;
+  created_at: string;
+};
+
+export const listPeople = () => list<Person>("/people");
+export const listPositions = () => list<Position>("/positions");
+export const createPosition = (body: { name: string; parent_id?: string }) =>
+  api<Position>("/positions", { method: "POST", body: JSON.stringify(body) });
+/** Structure is a question with a time in it; omit `asOf` for "now". */
+export const listRelationships = (asOf?: string) =>
+  list<Relationship>(
+    asOf ? `/relationships?as_of=${encodeURIComponent(asOf)}` : "/relationships",
+  );
+export const createRelationship = (body: {
+  subject_id: string;
+  kind: string;
+  object_id: string;
+  from?: string;
+  to?: string;
+}) =>
+  api<Relationship>("/relationships", { method: "POST", body: JSON.stringify(body) });
+export const endRelationship = (id: string, at?: string) =>
+  api<{ status: string }>(`/relationships/${id}/end`, {
+    method: "POST",
+    body: JSON.stringify(at ? { at } : {}),
+  });
 export const canApprove = (role?: Role) =>
   role === "approver" || role === "admin";
 export function digestFor(proposal: {

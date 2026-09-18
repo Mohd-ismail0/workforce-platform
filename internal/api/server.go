@@ -336,6 +336,9 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 	case path == "/handoffs" && r.Method == "GET":
 		x, e := s.store.ListHandoffs(ctx, id.OrgID, id.ID)
 		respond(w, x, e)
+	case path == "/people" && r.Method == "GET":
+		x, e := s.store.ListPeople(ctx, id.OrgID)
+		respond(w, x, e)
 	case path == "/positions" && r.Method == "GET":
 		x, e := s.store.ListPositions(ctx, id.OrgID)
 		respond(w, x, e)

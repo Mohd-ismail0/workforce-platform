@@ -88,6 +88,40 @@ func (s *Store) ListPositions(ctx context.Context, org string) ([]Position, erro
 	return out, e
 }
 
+// Person is a directory entry for a principal: enough to name someone in a
+// structure view without exposing anything about their authority beyond the role
+// that already governs it.
+type Person struct {
+	ID     string `json:"id"`
+	Name   string `json:"name"`
+	Role   string `json:"role"`
+	Active bool   `json:"active"`
+}
+
+// ListPeople returns the organization's principals. The organization structure
+// is unreadable without it: a reporting line between opaque ids tells nobody
+// anything, so the directory is part of the model rather than a separate feature.
+func (s *Store) ListPeople(ctx context.Context, org string) ([]Person, error) {
+	out := []Person{}
+	e := s.WithOrg(ctx, org, func(tx pgx.Tx) error {
+		rows, e := tx.Query(ctx,
+			`select id,name,role,active from principals where org_id=$1 order by name, id`, org)
+		if e != nil {
+			return e
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var p Person
+			if e := rows.Scan(&p.ID, &p.Name, &p.Role, &p.Active); e != nil {
+				return e
+			}
+			out = append(out, p)
+		}
+		return rows.Err()
+	})
+	return out, e
+}
+
 // CreateRelationship records an effective-dated relationship. `from` is
 // inclusive; `to` is exclusive and nil means "still in effect".
 //

@@ -25,6 +25,34 @@ func TestOrganizationEndpoints(t *testing.T) {
 		t.Fatalf("could not resolve principals: req=%q app=%q", reqID, appID)
 	}
 
+	// The directory: a structure view is unreadable without names, so /people is
+	// part of the model rather than a separate feature.
+	code, dir := f.do("req", "GET", "/api/v1/people", nil)
+	if code != 200 {
+		t.Fatalf("list people: %d", code)
+	}
+	names := map[string]bool{}
+	for _, raw := range dir["items"].([]any) {
+		p := raw.(map[string]any)
+		names[p["id"].(string)] = true
+		if p["name"] == "" {
+			t.Fatalf("person without a name: %v", p)
+		}
+	}
+	if !names[reqID] || !names[appID] {
+		t.Fatalf("directory does not contain this org's principals: %v", dir["items"])
+	}
+	// Another organization sees its own people and none of this org's.
+	if code, other := f.do("other", "GET", "/api/v1/people", nil); code != 200 {
+		t.Fatalf("cross-org people: %d", code)
+	} else {
+		for _, raw := range other["items"].([]any) {
+			if oid, _ := raw.(map[string]any)["id"].(string); oid == reqID || oid == appID {
+				t.Fatalf("cross-org people leak: %v", other["items"])
+			}
+		}
+	}
+
 	// Positions.
 	code, team := f.do("req", "POST", "/api/v1/positions", map[string]any{"name": "Finance"})
 	if code != 201 {
