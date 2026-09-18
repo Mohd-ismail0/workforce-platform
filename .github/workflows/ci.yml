@@ -1,0 +1,119 @@
+# Continuous integration for the workforce platform.
+#
+# Every merge must pass: Go build/vet, the full race-enabled PostgreSQL-backed
+# suite against a real database (migrations applied first), the Logto
+# provisioning contract guard, the frontend typecheck/build/tests, and spec
+# validation. None of these hit a live identity provider, provider connector or
+# public endpoint; they run entirely inside the runner's service container.
+#
+# A database is required, so a PostgreSQL service container is declared and a
+# fresh database is created for this job. Roles are operator-provisioned, not
+# created by migrations, so CI uses the postgres superuser for both the
+# migration owner and the runtime pool - this mirrors a provisioning step an
+# operator would perform outside the job on a real deployment.
+name: ci
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+jobs:
+  backend:
+    name: Go backend (race, real PostgreSQL)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    env:
+      PGPASSWORD: postgres
+      CI_DB_URL: postgres://postgres:postgres@127.0.0.1:5432/workforce_ci
+      CI_MIGRATION_DB_URL: postgres://postgres:postgres@127.0.0.1:5432/workforce_ci
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Create the job database
+        run: |
+          psql "postgres://postgres:postgres@127.0.0.1:5432/postgres" -c "CREATE DATABASE workforce_ci;"
+          psql "$CI_DB_URL" -c "SELECT version();" >/dev/null
+          echo "workforce_ci created and reachable"
+
+      - name: Apply migrations (migration owner)
+        run: |
+          MIGRATION_DATABASE_URL="$CI_MIGRATION_DB_URL" \
+          WORKFORCE_ADOPT_LEGACY_MIGRATIONS=1 \
+          go run ./cmd/workforce -migrate
+
+      - name: Go build
+        run: go build ./...
+
+      - name: Go vet
+        run: go vet ./...
+
+      - name: Full race suite (real DATABASE_URL, serialized packages)
+        run: go test -race -count=1 -p 1 ./...
+        env:
+          DATABASE_URL: ${{ env.CI_DB_URL }}
+          MIGRATION_DATABASE_URL: ${{ env.CI_MIGRATION_DB_URL }}
+
+      - name: Logto provisioning contract guard (mocked, no live provider)
+        run: python3 scripts/logto_provision_contract_test.py
+
+  frontend:
+    name: Frontend (typecheck, build, tests)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install
+        run: npm ci --no-audit --no-fund
+
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+      - name: Tests
+        run: npx vitest run
+
+      - name: Build
+        run: npm run build
+
+  spec:
+    name: Build spec validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Validate spec documents and milestone graph
+        run: python3 docs/build-spec/validate_spec.py
