@@ -336,6 +336,75 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 	case path == "/handoffs" && r.Method == "GET":
 		x, e := s.store.ListHandoffs(ctx, id.OrgID, id.ID)
 		respond(w, x, e)
+	case path == "/positions" && r.Method == "GET":
+		x, e := s.store.ListPositions(ctx, id.OrgID)
+		respond(w, x, e)
+	case path == "/positions" && r.Method == "POST":
+		var q struct {
+			Name     string `json:"name"`
+			ParentID string `json:"parent_id"`
+		}
+		if decode(r, &q) != nil || strings.TrimSpace(q.Name) == "" {
+			failCode(w, 422, "invalid_request", "a position name is required")
+			return
+		}
+		x, e := s.store.CreatePosition(ctx, id.OrgID, id.ID, q.Name, q.ParentID)
+		if e != nil {
+			fail(w, e)
+			return
+		}
+		jsonWrite(w, 201, x)
+	case path == "/relationships" && r.Method == "GET":
+		// Structure is a question with a time in it. `as_of` defaults to now, so
+		// the caller must ask for history deliberately rather than getting it by
+		// accident.
+		asOf := time.Now()
+		if raw := r.URL.Query().Get("as_of"); raw != "" {
+			ts, e := time.Parse(time.RFC3339, raw)
+			if e != nil {
+				failCode(w, 422, "invalid_request", "as_of must be an RFC3339 instant")
+				return
+			}
+			asOf = ts
+		}
+		x, e := s.store.RelationshipsAsOf(ctx, id.OrgID, asOf)
+		respond(w, x, e)
+	case path == "/relationships" && r.Method == "POST":
+		var q struct {
+			SubjectID string `json:"subject_id"`
+			Kind      string `json:"kind"`
+			ObjectID  string `json:"object_id"`
+			From      string `json:"from"`
+			To        string `json:"to"`
+		}
+		if decode(r, &q) != nil || q.SubjectID == "" || q.Kind == "" || q.ObjectID == "" {
+			failCode(w, 422, "invalid_request", "subject_id, kind and object_id are required")
+			return
+		}
+		from := time.Now()
+		if q.From != "" {
+			ts, e := time.Parse(time.RFC3339, q.From)
+			if e != nil {
+				failCode(w, 422, "invalid_request", "from must be an RFC3339 instant")
+				return
+			}
+			from = ts
+		}
+		var to *time.Time
+		if q.To != "" {
+			ts, e := time.Parse(time.RFC3339, q.To)
+			if e != nil {
+				failCode(w, 422, "invalid_request", "to must be an RFC3339 instant")
+				return
+			}
+			to = &ts
+		}
+		x, e := s.store.CreateRelationship(ctx, id.OrgID, id.ID, q.SubjectID, q.Kind, q.ObjectID, from, to)
+		if e != nil {
+			fail(w, e)
+			return
+		}
+		jsonWrite(w, 201, x)
 	case path == "/identity/links":
 		s.handleIdentityLinks(w, r, id)
 	case path == "/identity/links/unlink":
@@ -476,6 +545,27 @@ func (s *Server) routeResource(w http.ResponseWriter, r *http.Request, id platfo
 			}
 			return
 		}
+	}
+	if len(p) == 3 && p[0] == "relationships" && p[2] == "end" && r.Method == "POST" {
+		var q struct {
+			At string `json:"at"`
+		}
+		_ = decode(r, &q)
+		at := time.Now()
+		if q.At != "" {
+			ts, e := time.Parse(time.RFC3339, q.At)
+			if e != nil {
+				failCode(w, 422, "invalid_request", "at must be an RFC3339 instant")
+				return
+			}
+			at = ts
+		}
+		if e := s.store.EndRelationship(ctx, id.OrgID, id.ID, p[1], at); e != nil {
+			fail(w, e)
+			return
+		}
+		jsonWrite(w, 200, map[string]string{"status": "ended"})
+		return
 	}
 	if len(p) == 2 && p[0] == "handoffs" && r.Method == "GET" {
 		x, e := s.store.PeekHandoff(ctx, id.OrgID, p[1], id.ID)
