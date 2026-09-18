@@ -46,10 +46,12 @@ jobs:
           echo "workforce_ci created and reachable"
 
       - name: Apply migrations (migration owner)
+        id: migrate
         run: |
+          set -o pipefail
           MIGRATION_DATABASE_URL="$CI_MIGRATION_DB_URL" \
           WORKFORCE_ADOPT_LEGACY_MIGRATIONS=1 \
-          go run ./cmd/workforce -migrate
+          go run ./cmd/workforce -migrate 2>&1 | tee /tmp/migrate-output.log
 
       - name: Go build
         run: go build ./...
@@ -74,12 +76,14 @@ jobs:
           tail -120 /tmp/test-output.log
           exit 1
 
-      - name: Upload test logs
-        if: always() && steps.tests.conclusion != 'skipped'
+      - name: Upload backend logs
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: backend-test-output
-          path: /tmp/test-output.log
+          name: backend-logs
+          path: |
+            /tmp/test-output.log
+            /tmp/migrate-output.log
           if-no-files-found: ignore
 
       - name: Logto provisioning contract guard (mocked, no live provider)
