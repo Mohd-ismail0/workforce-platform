@@ -1,6 +1,13 @@
 import { useEffect, useState } from "react";
 import { Bot, Cpu, PauseCircle, ShieldAlert, Zap } from "lucide-react";
-import { getAgentBoard, listAgents, type Agent, type AgentBoard } from "@/api";
+import {
+  getAgentBoard,
+  getAgentConfiguration,
+  listAgents,
+  type Agent,
+  type AgentBoard,
+  type AgentConfiguration,
+} from "@/api";
 import { Badge } from "@/components/ui/badge";
 import { Empty, Panel } from "@/components/ui/panel";
 import { PageHeader } from "@/app/app-shell";
@@ -25,6 +32,7 @@ import { PageHeader } from "@/app/app-shell";
 export function AgentsPage() {
   const [agents, setAgents] = useState<Agent[]>([]);
   const [boards, setBoards] = useState<Record<string, AgentBoard>>({});
+  const [configs, setConfigs] = useState<Record<string, AgentConfiguration>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
@@ -39,7 +47,11 @@ export function AgentsPage() {
         const entries = await Promise.all(
           a.map(async (ag) => {
             try {
-              return [ag.id, await getAgentBoard(ag.id)] as const;
+              const [board, config] = await Promise.all([
+                getAgentBoard(ag.id),
+                getAgentConfiguration(ag.id),
+              ]);
+              return [ag.id, board, config] as const;
             } catch {
               return null;
             }
@@ -47,8 +59,15 @@ export function AgentsPage() {
         );
         if (cancelled) return;
         const m: Record<string, AgentBoard> = {};
-        for (const e of entries) if (e) m[e[0]] = e[1];
+        const c: Record<string, AgentConfiguration> = {};
+        for (const e of entries) {
+          if (e) {
+            m[e[0]] = e[1];
+            c[e[0]] = e[2];
+          }
+        }
         setBoards(m);
+        setConfigs(c);
       })
       .catch((e: Error) => !cancelled && setError(e.message))
       .finally(() => !cancelled && setLoading(false));
@@ -158,23 +177,53 @@ export function AgentsPage() {
                         {b?.tasks.length ? ` · ${b.tasks.length} open task${b.tasks.length === 1 ? "" : "s"}` : ""}
                       </p>
 
-                      {a.capabilities?.length ? (
-                        <div className="mt-2 flex flex-wrap gap-1">
-                          {a.capabilities.map((c) => (
-                            <span
-                              key={c}
-                              className="rounded border border-[--color-line-strong] px-1.5 py-0.5 text-[10px] text-[--color-ink-2]"
-                            >
-                              {c}
-                            </span>
-                          ))}
-                        </div>
-                      ) : (
-                        <p className="mt-2 text-[10px] text-[--color-ink-3]">
-                          No capabilities declared — it can prepare, and nothing
-                          more.
-                        </p>
-                      )}
+                      {(() => {
+                        const cfg = configs[a.id];
+                        const declared = cfg?.declared ?? a.capabilities ?? [];
+                        const denied = new Set(cfg?.denied ?? []);
+                        if (!declared.length) {
+                          return (
+                            <p className="mt-2 text-[10px] text-[--color-ink-3]">
+                              No capabilities declared — it can prepare, and
+                              nothing more.
+                            </p>
+                          );
+                        }
+                        return (
+                          <div className="mt-2">
+                            <div className="flex flex-wrap gap-1">
+                              {declared.map((c) => (
+                                <span
+                                  key={c}
+                                  className={
+                                    denied.has(c)
+                                      ? "rounded border border-[--color-danger]/50 px-1.5 py-0.5 text-[10px] text-[--color-danger]"
+                                      : "rounded border border-[--color-line-strong] px-1.5 py-0.5 text-[10px] text-[--color-ink-2]"
+                                  }
+                                >
+                                  {c}
+                                </span>
+                              ))}
+                            </div>
+                            {denied.size ? (
+                              <p className="mt-1 text-[10px] text-[--color-danger]">
+                                Not granted by the {cfg?.harness ?? a.harness}{" "}
+                                release — a run would be refused at admission.
+                              </p>
+                            ) : (
+                              <p className="mt-1 text-[10px] text-[--color-ink-3]">
+                                Within what the harness release permits
+                                {cfg?.available.length
+                                  ? ` · ${cfg.available.length} further capability${
+                                      cfg.available.length === 1 ? "" : "ies"
+                                    } not used`
+                                  : ""}
+                                .
+                              </p>
+                            )}
+                          </div>
+                        );
+                      })()}
                     </div>
                     {running > 0 ? (
                       <Badge tone="accent">working</Badge>

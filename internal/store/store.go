@@ -333,6 +333,10 @@ func (s *Store) CreateAgent(ctx context.Context, org, name, harness, owner strin
 	var x Agent
 	b, _ := json.Marshal(caps)
 	e := s.WithOrg(ctx, org, func(tx pgx.Tx) error {
+		// An agent DEFINITION is metadata. Capabilities are enforced at RUN
+		// admission, where the effective ceiling is known and where the spec puts
+		// the gate ("missing required capabilities fail admission"). Checking here
+		// would refuse to even describe an agent before its harness is installed.
 		id := platform.NewID()
 		return tx.QueryRow(ctx, "insert into agents(id,org_id,name,harness,owner_id,capabilities) values($1,$2,$3,$4,$5,$6) returning id,org_id,name,harness,status,owner_id,capabilities", id, org, name, harness, owner, b).Scan(&x.ID, &x.OrgID, &x.Name, &x.Harness, &x.Status, &x.OwnerID, &b)
 	})

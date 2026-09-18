@@ -455,6 +455,28 @@ export type AgentBoard = {
 };
 export const getAgentBoard = (agentId: string) =>
   api<AgentBoard>(`/agents/${agentId}/board`);
+
+/**
+ * An agent's effective configuration: what it declares, the ceiling its harness
+ * permits, anything declared outside that ceiling, and the headroom left.
+ * `denied` should be empty for a healthy agent — which is why it is shown.
+ */
+export type AgentConfiguration = {
+  agent_id: string;
+  harness: string;
+  declared: string[];
+  permitted: string[];
+  denied: string[];
+  available: string[];
+};
+export const getAgentConfiguration = (agentId: string) =>
+  api<AgentConfiguration>(`/agents/${agentId}/configuration`);
+/** What would be denied, answered before anything is launched. */
+export const checkCapabilities = (harness: string, capabilities: string[]) =>
+  api<{ permitted: string[]; denied: string[] }>("/capabilities/check", {
+    method: "POST",
+    body: JSON.stringify({ harness, capabilities }),
+  });
 export const listPositions = () => list<Position>("/positions");
 
 /**

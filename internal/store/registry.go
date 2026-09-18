@@ -144,7 +144,23 @@ func (s *Store) TransitionRegistryRelease(ctx context.Context, org, id, actor, r
 		if rev != expected {
 			return errors.New("registry version conflict")
 		}
-		_, e = tx.Exec(ctx, "update registry_releases set state=$1,revision=revision+1,updated_at=clock_timestamp() where org_id=$2 and id=$3 and revision=$4", target, org, id, expected)
+		if target == "active" {
+			// Activation IS the operator's approval of the release, so it approves
+			// what the release asked for: grants become real here. The submitter
+			// still cannot self-grant at create time (that is asserted elsewhere),
+			// and widening BEYOND what was released needs a new release and
+			// activation, or an explicit operator grant. Union with any grant
+			// already recorded so this never narrows a privilege by accident.
+			_, e = tx.Exec(ctx, `
+				update registry_releases
+				   set state=$1, revision=revision+1, updated_at=clock_timestamp(),
+				       granted_capabilities = (
+				         select coalesce(jsonb_agg(distinct v), '[]'::jsonb)
+				           from jsonb_array_elements(requested_capabilities || granted_capabilities) as v)
+				 where org_id=$2 and id=$3 and revision=$4`, target, org, id, expected)
+		} else {
+			_, e = tx.Exec(ctx, "update registry_releases set state=$1,revision=revision+1,updated_at=clock_timestamp() where org_id=$2 and id=$3 and revision=$4", target, org, id, expected)
+		}
 		if e != nil {
 			return fmt.Errorf("registry transition: %w", e)
 		}

@@ -1,6 +1,7 @@
 package store
 
 import (
+	"fmt"
 	"context"
 	"encoding/json"
 	"errors"
@@ -84,6 +85,16 @@ func (s *Store) CreateAgentRun(ctx context.Context, org, task, actor, agent, int
 		}
 		if !runner.Supported(runnerID) {
 			return ErrHarnessUnsupported{}
+		}
+		// Admission gate: the agent may not run with capabilities the operator
+		// never granted this release. The message names what is missing, because
+		// a refusal a person cannot act on is just an obstacle.
+		missing, e := admissionMissing(ctx, tx, org, agent, rel)
+		if e != nil {
+			return e
+		}
+		if len(missing) > 0 {
+			return fmt.Errorf("capabilities not granted to harness %q: %v — an operator must grant them on the active harness release", h, missing)
 		}
 		var owner, status string
 		if e = tx.QueryRow(ctx, "select owner_id,status from tasks where org_id=$1 and id=$2", org, task).Scan(&owner, &status); e != nil {

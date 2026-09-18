@@ -276,6 +276,42 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		} else {
 			fail(w, e)
 		}
+	case strings.HasPrefix(path, "/registry/releases/") && strings.HasSuffix(path, "/grant") && r.Method == "POST":
+		p := strings.Split(strings.Trim(path, "/"), "/")
+		if len(p) != 4 {
+			failCode(w, 404, "not_found", "not found")
+			return
+		}
+		var q struct {
+			ExpectedVersion int64    `json:"expected_version"`
+			Capabilities    []string `json:"capabilities"`
+		}
+		if decode(r, &q) != nil || q.ExpectedVersion < 1 || len(q.Capabilities) == 0 {
+			failCode(w, 422, "invalid_request", "expected_version and capabilities are required")
+			return
+		}
+		x, e := s.store.GrantRegistryCapabilities(ctx, id.OrgID, id.ID, id.Role, p[2], q.Capabilities, q.ExpectedVersion)
+		if e == nil {
+			jsonWrite(w, 200, x)
+		} else {
+			fail(w, e)
+		}
+	case path == "/capabilities/check" && r.Method == "POST":
+		// "What would be denied" BEFORE anything is launched.
+		var q struct {
+			Harness      string   `json:"harness"`
+			Capabilities []string `json:"capabilities"`
+		}
+		if decode(r, &q) != nil || q.Harness == "" {
+			failCode(w, 422, "invalid_request", "harness is required")
+			return
+		}
+		x, e := s.store.CheckCapabilities(ctx, id.OrgID, q.Harness, q.Capabilities)
+		if e != nil {
+			fail(w, e)
+			return
+		}
+		jsonWrite(w, 200, x)
 	case path == "/integrations" && r.Method == "GET":
 		jsonWrite(w, 200, map[string]any{"items": s.registry.List()})
 	case strings.HasPrefix(path, "/integrations/") && strings.HasSuffix(path, "/records") && r.Method == "GET":
@@ -644,6 +680,17 @@ func (s *Server) routeResource(w http.ResponseWriter, r *http.Request, id platfo
 			jsonWrite(w, 201, map[string]string{"status": "linked"})
 			return
 		}
+	}
+	if len(p) == 3 && p[0] == "agents" && p[2] == "configuration" && r.Method == "GET" {
+		// Effective configuration: what the agent declares, the ceiling its
+		// harness permits, anything outside that ceiling, and the headroom left.
+		x, e := s.store.AgentConfiguration(ctx, id.OrgID, p[1])
+		if e != nil {
+			fail(w, e)
+			return
+		}
+		jsonWrite(w, 200, x)
+		return
 	}
 	if len(p) == 3 && p[0] == "agents" && p[2] == "board" && r.Method == "GET" {
 		// One agent's current state: what it is reasoning about, what is queued,

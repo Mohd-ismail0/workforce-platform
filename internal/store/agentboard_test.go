@@ -111,7 +111,10 @@ func TestAgentIdentityCannotApprove(t *testing.T) {
 	if e := s.Decide(ctx, org, prop.ID, req, "requester", "endorse", prop.Revision, prop.Digest, ""); e != nil {
 		t.Fatalf("endorse: %v", e)
 	}
-	ag, e := s.CreateAgent(ctx, org, "approver-bot", "simulator", req, []string{"approve:work"})
+	// No capabilities declared: an agent cannot even be given a capability an
+	// operator has not granted (see the capability tests). The point here is that
+	// an agent id is not a principal, so it can never satisfy human approval.
+	ag, e := s.CreateAgent(ctx, org, "approver-bot", "simulator", req, nil)
 	if e != nil {
 		t.Fatal(e)
 	}
