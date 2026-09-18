@@ -51,8 +51,42 @@ This is a partial working platform foundation, not completion of the full build 
 - Business keys accept the identifiers real work produces, including `@` and a leading `+` (supplier/customer email addresses, tagged addresses, phone numbers). Rejecting them forced harnesses to mangle keys, and a mangled key is a weaker duplicate guard than the real identifier.
 - A successful harness run means *preparation completed*, not business completion. The run is labelled as preparing a proposal; the effect happens only after human approval through the existing executor.
 - Recovery is eligibility, not scheduling: an expired claim becomes reclaimable, but no scheduler is guaranteed to retry it. The lease is now derived from the runner's own timeout budget (+60s, 2-minute floor) so a slow-but-healthy harness cannot outlive its lease.
-- Test suites share one database and one River queue; isolation is achieved by running packages serially (`-p 1`). Within `internal/api`, several tests start real workers on that shared queue, so a run may legitimately be claimed mid-test. Guarantees about *not being claimed* are therefore asserted in `internal/store`, which drives the store directly with no worker present; `internal/api` asserts only what holds regardless of scheduling (no publication bypasses human review).
-- Per-suite isolated databases/queues are the proper follow-up and are not yet implemented.
+- Locally, test suites share one database and one River queue; isolation is achieved by running packages serially (`-p 1`). Within `internal/api`, several tests start real workers on that shared queue, so a run may legitimately be claimed mid-test. Guarantees about *not being claimed* are therefore asserted in `internal/store`, which drives the store directly with no worker present; `internal/api` asserts only what holds regardless of scheduling (no publication bypasses human review).
+- Per-package isolated databases ARE implemented (`internal/testdb`) and used in CI, where packages run in PARALLEL against their own freshly-migrated database. Locally the shared-LXC roles cannot CREATE DATABASE, so the helper degrades to the shared database and `-p 1` remains the correctness guarantee in that mode.
+
+## Continuous integration
+
+`.github/workflows/ci.yml` runs on every push to `main` and every pull request,
+in three jobs: the Go race suite against a real PostgreSQL service container
+(with migrations applied first), the frontend typecheck/build/tests, and spec
+validation. None touch a live provider or public endpoint. **CI is green**
+(commit `a1b3229`).
+
+The backend job provisions a dedicated NON-SUPERUSER role (`workforce_app`,
+NOSUPERUSER NOBYPASSRLS, CREATEDB) that owns the database; the superuser is used
+only to provision. This is deliberate: a superuser or any `BYPASSRLS` role
+silently bypasses row-level security (`FORCE ROW LEVEL SECURITY` binds the table
+owner, not a superuser), so a superuser runtime role would make every
+tenant-isolation policy inert. Per-package test databases (see
+`internal/testdb`) are created and owned by the same ordinary role, so packages
+run in parallel with RLS genuinely enforced.
+
+Building CI caught three production-blocking defects that local testing
+structurally could not, because the local shared-LXC roles cannot CREATE
+DATABASE and its database is already migrated:
+
+1. `internal/testdb` migrated per-package databases with a RELATIVE `migrations`
+   path that `go test` resolves from the package directory, leaving the fresh
+   database unmigrated and every test failing on missing relations.
+2. **`002_river` aborted a fresh database**: PL/pgSQL does not short-circuit
+   `a AND b` in an `IF`, so `EXISTS (SELECT 1 FROM river_job)` ran while
+   `river_job` did not yet exist (River creates its tables after the numbered
+   migrations), raising `42P01`. Fixed by nesting the checks. Already-migrated
+   databases are unaffected in behaviour; correcting an applied migration
+   requires the explicit, reported `WORKFORCE_REPAIR_MIGRATION_CHECKSUMS=1`.
+3. The runtime role being a superuser left RLS inert, which the cross-org
+   isolation test exposed as a real breach (`org-fixture-b` could read
+   `org-fixture-a`'s task).
 
 ## Evidence
 
