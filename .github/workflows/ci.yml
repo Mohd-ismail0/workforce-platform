@@ -1,16 +1,4 @@
 # Continuous integration for the workforce platform.
-#
-# Every merge must pass: Go build/vet, the full race-enabled PostgreSQL-backed
-# suite against a real database (migrations applied first), the Logto
-# provisioning contract guard, the frontend typecheck/build/tests, and spec
-# validation. None of these hit a live identity provider, provider connector or
-# public endpoint; they run entirely inside the runner's service container.
-#
-# A database is required, so a PostgreSQL service container is declared and a
-# fresh database is created for this job. Roles are operator-provisioned, not
-# created by migrations, so CI uses the postgres superuser for both the
-# migration owner and the runtime pool - this mirrors a provisioning step an
-# operator would perform outside the job on a real deployment.
 name: ci
 
 on:
@@ -39,6 +27,7 @@ jobs:
 
     env:
       PGPASSWORD: postgres
+      CI_ADMIN_DB_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres
       CI_DB_URL: postgres://postgres:postgres@127.0.0.1:5432/workforce_ci
       CI_MIGRATION_DB_URL: postgres://postgres:postgres@127.0.0.1:5432/workforce_ci
 
@@ -52,7 +41,7 @@ jobs:
 
       - name: Create the job database
         run: |
-          psql "postgres://postgres:postgres@127.0.0.1:5432/postgres" -c "CREATE DATABASE workforce_ci;"
+          psql "$CI_ADMIN_DB_URL" -c "CREATE DATABASE workforce_ci;"
           psql "$CI_DB_URL" -c "SELECT version();" >/dev/null
           echo "workforce_ci created and reachable"
 
@@ -68,17 +57,30 @@ jobs:
       - name: Go vet
         run: go vet ./...
 
-      - name: Full race suite (real DATABASE_URL, isolated per-package DBs)
-        # TEST_MASTER_DATABASE_URL lets the api package run against its own
-        # freshly-migrated throwaway database (see internal/testdb); the store
-        # and runner packages each get their own too. With per-package
-        # databases, packages may run in PARALLEL (no -p 1), which is the
-        # proof that the isolation works rather than a claim.
-        run: go test -race -count=1 ./...
+      - name: Full race suite (isolated per-package DBs)
+        id: tests
+        run: |
+          set -o pipefail
+          go test -race -count=1 ./... 2>&1 | tee /tmp/test-output.log
         env:
           DATABASE_URL: ${{ env.CI_DB_URL }}
           MIGRATION_DATABASE_URL: ${{ env.CI_MIGRATION_DB_URL }}
-          TEST_MASTER_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres
+          TEST_MASTER_DATABASE_URL: ${{ env.CI_ADMIN_DB_URL }}
+
+      - name: Surface test failure
+        if: failure() && steps.tests.outcome == 'failure'
+        run: |
+          echo "The test suite failed. Tail of output:"
+          tail -120 /tmp/test-output.log
+          exit 1
+
+      - name: Upload test logs
+        if: always() && steps.tests.conclusion != 'skipped'
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-test-output
+          path: /tmp/test-output.log
+          if-no-files-found: ignore
 
       - name: Logto provisioning contract guard (mocked, no live provider)
         run: python3 scripts/logto_provision_contract_test.py
@@ -89,25 +91,19 @@ jobs:
     defaults:
       run:
         working-directory: web
-
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
           cache: npm
           cache-dependency-path: web/package-lock.json
-
       - name: Install
         run: npm ci --no-audit --no-fund
-
       - name: Typecheck
         run: npx tsc --noEmit
-
       - name: Tests
         run: npx vitest run
-
       - name: Build
         run: npm run build
 
@@ -116,10 +112,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-
       - name: Validate spec documents and milestone graph
         run: python3 docs/build-spec/validate_spec.py
