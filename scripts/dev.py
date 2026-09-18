@@ -27,6 +27,11 @@ env.setdefault('HTTP_ADDR','127.0.0.1:8095')
 env.setdefault('APP_ENV','development')
 if a.action != 'migrate': env.pop('MIGRATION_DATABASE_URL',None)
 if a.action == 'test' and not env.get('DATABASE_URL'): raise SystemExit('DATABASE_URL required: this test command must not silently skip PostgreSQL tests')
+# TEST_MASTER_DATABASE_URL lets packages run against their OWN migrated
+# throwaway database (see internal/testdb). It is optional: when absent or when
+# the role lacks CREATEDB, tests fall back to the shared DATABASE_URL and the
+# -p 1 serialisation below remains the correctness guarantee.
+env.setdefault('TEST_MASTER_DATABASE_URL', env.get('MIGRATION_DATABASE_URL') or '')
 commands={
  'migrate':['go','run','./cmd/workforce','-migrate'],
  'seed':['go','run','./cmd/workforce','-seed'],
@@ -34,6 +39,10 @@ commands={
  'worker':['go','run','./cmd/workforce','-worker'],
  # -p 1: packages run serially. The api tests start real River workers on the
  # shared database and queue, so parallel packages would steal each other's jobs.
+ # This is only half the story: with TEST_MASTER_DATABASE_URL set and a role
+ # that can CREATE DATABASE (CI), each package runs on its own database and -p 1
+ # is no longer required. CI uses that path; local shared-LXC cannot CREATE
+ # DATABASE and relies on serialisation.
  'test':['go','test','-race','-count=1','-p','1','./...'],
  'build':['go','build','-o','bin/workforce','./cmd/workforce'],
 }

@@ -68,11 +68,17 @@ jobs:
       - name: Go vet
         run: go vet ./...
 
-      - name: Full race suite (real DATABASE_URL, serialized packages)
-        run: go test -race -count=1 -p 1 ./...
+      - name: Full race suite (real DATABASE_URL, isolated per-package DBs)
+        # TEST_MASTER_DATABASE_URL lets the api package run against its own
+        # freshly-migrated throwaway database (see internal/testdb); the store
+        # and runner packages each get their own too. With per-package
+        # databases, packages may run in PARALLEL (no -p 1), which is the
+        # proof that the isolation works rather than a claim.
+        run: go test -race -count=1 ./...
         env:
           DATABASE_URL: ${{ env.CI_DB_URL }}
           MIGRATION_DATABASE_URL: ${{ env.CI_MIGRATION_DB_URL }}
+          TEST_MASTER_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres
 
       - name: Logto provisioning contract guard (mocked, no live provider)
         run: python3 scripts/logto_provision_contract_test.py
