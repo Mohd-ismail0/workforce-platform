@@ -3,6 +3,9 @@ import { useParams } from "react-router-dom";
 import { AlertTriangle, Check, CircleDot, ThumbsUp } from "lucide-react";
 import {
   acceptHandoff,
+  cancelHandoff,
+  clarifyHandoff,
+  declineHandoff,
   getTask,
   listGates,
   listHandoffs,
@@ -15,8 +18,10 @@ import {
 } from "@/api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Panel, PanelHeader } from "@/components/ui/panel";
 import { PageHeader } from "@/app/app-shell";
+import { useSession } from "@/app/session";
 import { OperationHeading, OperationPreview } from "@/features/task/previews";
 import { GateForm } from "@/features/inbox/gate-form";
 import { respondToGate } from "@/api";
@@ -38,6 +43,7 @@ import { respondToGate } from "@/api";
  */
 export function TaskPage() {
   const { id = "" } = useParams();
+  const { me } = useSession();
   const [task, setTask] = useState<Task>();
   const [proposals, setProposals] = useState<Proposal[]>([]);
   const [gates, setGates] = useState<Gate[]>([]);
@@ -201,41 +207,13 @@ export function TaskPage() {
                 </div>
               ))}
               {handoffs.map((h) => (
-                <div key={h.id} className="flex items-start gap-3 p-3.5">
-                  <CircleDot className="mt-0.5 size-3.5 shrink-0 text-[--color-ink-3]" />
-                  <div className="min-w-0 flex-1">
-                    <p className="text-[11px]">
-                      <span className="font-medium">Handoff</span>{" "}
-                      <span className="text-[--color-ink-3]">
-                        {h.state} · {h.role}
-                      </span>
-                    </p>
-                    <p className="mt-0.5 text-[11px] text-[--color-ink-3]">
-                      {h.summary}
-                    </p>
-                    {h.state === "offered" ? (
-                      <Button
-                        size="sm"
-                        variant="accent"
-                        className="mt-2"
-                        disabled={busy}
-                        onClick={async () => {
-                          setBusy(true);
-                          try {
-                            await acceptHandoff(h.id);
-                            load();
-                          } catch (e) {
-                            setActionError((e as Error).message);
-                          } finally {
-                            setBusy(false);
-                          }
-                        }}
-                      >
-                        Accept handoff
-                      </Button>
-                    ) : null}
-                  </div>
-                </div>
+                <HandoffCard
+                  key={h.id}
+                  handoff={h}
+                  viewer={me?.id || ""}
+                  onChanged={load}
+                  onError={setActionError}
+                />
               ))}
             </div>
           </Panel>
@@ -388,5 +366,176 @@ function TechnicalPanel({
         )}
       </pre>
     </details>
+  );
+}
+
+/**
+ * One handoff offer, with the replies that are actually available to THIS
+ * person.
+ *
+ * A handoff is not just "accept": a recipient who cannot do the work must be
+ * able to decline with a reason, and one who has a question must be able to ask
+ * it rather than guess. The creator, separately, withdraws their own offer.
+ * Showing only "Accept" forced people to take work they could not do, or to
+ * leave it unanswered forever.
+ *
+ * Which actions appear is derived from the viewer's relationship to the offer
+ * (recipient or creator) and the offer's state. The server re-checks all of
+ * this; the UI only avoids offering an action that would be refused.
+ */
+function HandoffCard({
+  handoff,
+  viewer,
+  onChanged,
+  onError,
+}: {
+  handoff: HandoffOffer;
+  viewer: string;
+  onChanged: () => void;
+  onError: (message: string) => void;
+}) {
+  const [note, setNote] = useState("");
+  const [mode, setMode] = useState<"" | "decline" | "clarify" | "cancel">("");
+  const [busy, setBusy] = useState(false);
+
+  const open = handoff.state === "offered" || handoff.state === "clarification_requested";
+  const isRecipient = viewer !== "" && handoff.recipient_id === viewer;
+  const isCreator = viewer !== "" && handoff.created_by === viewer;
+
+  const run = async (fn: () => Promise<unknown>) => {
+    setBusy(true);
+    try {
+      await fn();
+      setMode("");
+      setNote("");
+      onChanged();
+    } catch (e) {
+      onError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const tone =
+    handoff.state === "accepted"
+      ? "accent"
+      : handoff.state === "declined"
+        ? "danger"
+        : handoff.state === "expired" || handoff.state === "cancelled"
+          ? "neutral"
+          : "pending";
+
+  return (
+    <div className="flex items-start gap-3 p-3.5">
+      <CircleDot className="mt-0.5 size-3.5 shrink-0 text-[--color-ink-3]" />
+      <div className="min-w-0 flex-1">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-[11px] font-medium">Handoff</span>
+          <Badge tone={tone}>{handoff.state.replace(/_/g, " ")}</Badge>
+          <span className="text-[11px] text-[--color-ink-3]">
+            {handoff.role === "owner" ? "ownership" : "execution"}
+            {handoff.hop_depth > 1 ? ` · transfer ${handoff.hop_depth}` : ""}
+          </span>
+        </div>
+        <p className="mt-0.5 text-[11px] text-[--color-ink-3]">
+          {handoff.summary || "No summary given"}
+        </p>
+        {handoff.reason ? (
+          <p className="mt-1 text-[11px] text-[--color-ink-2]">
+            <span className="text-[--color-ink-3]">
+              {handoff.state === "clarification_requested" ? "Question: " : "Note: "}
+            </span>
+            {handoff.reason}
+          </p>
+        ) : null}
+        {open && handoff.expires_at ? (
+          <p className="mt-1 text-[10px] text-[--color-ink-3]">
+            Expires {new Date(handoff.expires_at).toLocaleString()} if not
+            answered
+          </p>
+        ) : null}
+
+        {open && isRecipient ? (
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <Button
+              size="sm"
+              variant="accent"
+              disabled={busy}
+              onClick={() => void run(() => acceptHandoff(handoff.id))}
+            >
+              Accept
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={busy}
+              onClick={() => setMode(mode === "decline" ? "" : "decline")}
+            >
+              Decline
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={busy}
+              onClick={() => setMode(mode === "clarify" ? "" : "clarify")}
+            >
+              Ask a question
+            </Button>
+          </div>
+        ) : null}
+
+        {open && isCreator && !isRecipient ? (
+          <div className="mt-2">
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={busy}
+              onClick={() => setMode(mode === "cancel" ? "" : "cancel")}
+            >
+              Withdraw offer
+            </Button>
+          </div>
+        ) : null}
+
+        {open && mode ? (
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <Input
+              autoFocus
+              value={note}
+              onChange={(e) => setNote(e.target.value)}
+              placeholder={
+                mode === "clarify"
+                  ? "What do you need to know?"
+                  : mode === "decline"
+                    ? "Why can't you take this?"
+                    : "Why are you withdrawing it?"
+              }
+              className="max-w-sm"
+            />
+            <Button
+              size="sm"
+              variant={mode === "cancel" ? "ghost" : "default"}
+              disabled={busy || (mode !== "cancel" && !note.trim())}
+              onClick={() =>
+                void run(() => {
+                  if (mode === "decline") return declineHandoff(handoff.id, note.trim());
+                  if (mode === "clarify") return clarifyHandoff(handoff.id, note.trim());
+                  return cancelHandoff(handoff.id, note.trim());
+                })
+              }
+            >
+              {mode === "clarify"
+                ? "Ask"
+                : mode === "decline"
+                  ? "Decline handoff"
+                  : "Withdraw"}
+            </Button>
+            <Button size="sm" variant="ghost" disabled={busy} onClick={() => setMode("")}>
+              Cancel
+            </Button>
+          </div>
+        ) : null}
+      </div>
+    </div>
   );
 }

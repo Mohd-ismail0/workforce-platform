@@ -144,6 +144,14 @@ export type HandoffOffer = {
   state: string;
   created_by: string;
   created_at: string;
+  /** When an unanswered offer stops being actionable. Empty when none. */
+  expires_at: string;
+  /** Set once the offer stops being open (accepted/declined/expired/cancelled). */
+  resolved_at: string;
+  /** The current note: clarification question, decline reason or withdrawal reason. */
+  reason: string;
+  /** Accountability-transfer depth. */
+  hop_depth: number;
 };
 
 export type GateKind = "clarification" | "selection" | "missing_information";
@@ -362,6 +370,24 @@ export const acceptHandoff = (handoffId: string) =>
   api<HandoffOffer>(`/handoffs/${handoffId}/accept`, {
     method: "POST",
     body: JSON.stringify({}),
+  });
+/** The recipient refuses the work, saying why. Not the same as cancelling. */
+export const declineHandoff = (handoffId: string, reason: string) =>
+  api<{ status: string }>(`/handoffs/${handoffId}/decline`, {
+    method: "POST",
+    body: JSON.stringify({ reason }),
+  });
+/** The recipient asks a question instead of guessing; the offer stays open. */
+export const clarifyHandoff = (handoffId: string, question: string) =>
+  api<{ status: string }>(`/handoffs/${handoffId}/clarify`, {
+    method: "POST",
+    body: JSON.stringify({ reason: question }),
+  });
+/** The creator withdraws their own offer. */
+export const cancelHandoff = (handoffId: string, reason: string) =>
+  api<{ status: string }>(`/handoffs/${handoffId}/cancel`, {
+    method: "POST",
+    body: JSON.stringify({ reason }),
   });
 export const canApprove = (role?: Role) =>
   role === "approver" || role === "admin";
