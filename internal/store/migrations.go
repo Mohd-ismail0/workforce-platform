@@ -61,7 +61,21 @@ func Migrate(ctx context.Context, url, dir string) error {
 				continue
 			}
 			if *stored != sum {
-				return fmt.Errorf("applied migration checksum mismatch: %s", version)
+				// A corrected migration is a deliberate, reviewed act: the fresh-install
+				// path may need a fix that an already-migrated database never re-runs.
+				// Re-recording the checksum therefore requires an explicit operator flag
+				// and is reported, never silent - otherwise the guard would be
+				// meaningless. Read the reason before using it: only a migration whose
+				// change is provably a no-op for already-migrated databases may be
+				// repaired this way.
+				if os.Getenv("WORKFORCE_REPAIR_MIGRATION_CHECKSUMS") != "1" {
+					return fmt.Errorf("applied migration checksum mismatch: %s (a corrected migration requires WORKFORCE_REPAIR_MIGRATION_CHECKSUMS=1 and review)", version)
+				}
+				if _, e = conn.Exec(ctx, "UPDATE workforce_migrations SET checksum=$2 WHERE version=$1", version, sum); e != nil {
+					return e
+				}
+				fmt.Fprintf(os.Stderr, "repaired migration checksum for %s after an explicit operator request\n", version)
+				continue
 			}
 			continue
 		}
