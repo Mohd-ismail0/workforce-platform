@@ -101,7 +101,24 @@ Verified by execution, not assertion:
 - The BFF browser foundation is implemented and tested: authorization-code + PKCE,
   single-use state/nonce transactions, hashed server-side sessions, revocation,
   offboarding checks, HttpOnly/Secure/SameSite cookies and CSRF protection. Migration 012
-  applies repeatably. **A real human browser login has not yet been exercised.**
+  applies repeatably.
+- **A real human browser login HAS been exercised and passes.** Driven over CDP against the
+  headed browser (`scripts/signin_acceptance.py`, `scripts/session_acceptance.py`): the
+  round trip returns to the panel, `__Host-workforce_session` is stored with `secure=true`
+  and `httpOnly=true`, `GET /auth/session` reports
+  `{authenticated:true, identity:{id:mdil, org_id:xsama, role:admin}}`, and `GET /api/v1/me`
+  succeeds using that cookie alone. A reload preserves the session.
+- **The cookie transport is load-bearing and was the cause of a real sign-in failure.**
+  `__Host-workforce_session` requires the `Secure` attribute; with
+  `WORKFORCE_COOKIE_SECURE=false` the browser discarded it silently, so the callback
+  succeeded, a session row was written, and the page still showed the sign-in screen. Chrome
+  treats `http://127.0.0.1` as a trustworthy origin, so a Secure cookie is accepted there and
+  `WORKFORCE_COOKIE_SECURE=true` is correct for the local topology — not a workaround.
+- CSRF enforcement and logout were verified in the browser, not only in unit tests: a
+  cookie-authenticated `POST` without `X-CSRF-Token` is refused `403 csrf_failed` while the
+  same request with the header is routed (a non-existent path returns `404`), and after
+  `POST /auth/logout` the session reports signed out and the API returns `401`. The logout leg
+  of the acceptance script is opt-in (`--with-logout`) because it ends a real session.
 - The UI now asks the BFF for session state first and shows "Sign in with SSO" when the browser
   flow is configured; the token form appears only when `/auth/session` refuses because the
   deployment is in local mode. The credential is an HttpOnly cookie the page cannot read; no
