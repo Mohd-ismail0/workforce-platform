@@ -105,7 +105,12 @@ function App() {
         setSignedIn(false);
       })
       .catch(() => {
-        if (!cancelled) setAuthMode("local");
+        if (cancelled) return;
+        // The session endpoint was reachable but failed. This is NOT local mode: showing a
+        // development token form here would invite a shared secret where real sign-in exists.
+        // Fail towards the SSO screen with an explicit reason instead.
+        setAuthMode("session");
+        setAuthError("login_failed");
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -166,9 +171,17 @@ function App() {
         if (authMode === "session") {
           // For a cookie session, logging out must end it server-side. Clearing a client
           // variable would leave the cookie in place and the user still signed in.
-          void logout().then((url) => {
-            window.location.href = url || "/";
-          });
+          //
+          // A reload is used as the fallback when the server does not hand back an end-session
+          // URL, and also when the logout call FAILS: the page must not sit looking signed in
+          // while the session is in an unknown state, and a reload re-asks the server.
+          void logout()
+            .then((url) => {
+              window.location.href = url || "/";
+            })
+            .catch(() => {
+              window.location.reload();
+            });
           return;
         }
         setToken("");

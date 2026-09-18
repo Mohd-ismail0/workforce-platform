@@ -183,21 +183,41 @@ export type SessionState = {
 };
 
 let csrfToken = "";
+// browserSessionMode records that the deployment uses the BFF cookie flow. It is deliberately
+// sticky for the life of the page: once the server has answered /auth/session, the local
+// development token must not be raced against the cookie (see api()).
+let browserSessionMode = false;
 
-/** Ask the BFF who we are. Returns null when the browser flow is not configured at all. */
+/** Ask the BFF who we are. Returns null ONLY when the browser flow is not configured. */
 export async function getSession(): Promise<SessionState | null> {
   const response = await fetch("/auth/session", {
     credentials: "same-origin",
     headers: { Accept: "application/json" },
   });
-  // 401 means the endpoint refused because the browser flow is not configured (local mode).
-  // That is a different fact from "configured but nobody is signed in", which is 200 with
-  // authenticated:false, and the UI must not confuse the two.
-  if (response.status === 401) return null;
-  if (!response.ok) return null;
+  // 401 is a definite statement: the endpoint refused because the browser flow is not
+  // configured (local mode). That is different from "configured but nobody is signed in",
+  // which is 200 with authenticated:false.
+  if (response.status === 401) {
+    browserSessionMode = false;
+    return null;
+  }
+  // Any other failure is NOT "not configured" and must not be reported as one. Treating an
+  // unreachable API as local mode would show a development token form in a real deployment,
+  // inviting a shared secret as a credential.
+  if (!response.ok) {
+    throw new Error(`session endpoint failed (${response.status})`);
+  }
   const body = (await response.json().catch(() => null)) as SessionState | null;
-  if (!body) return null;
+  if (!body) throw new Error("session endpoint returned a non-JSON response");
+
+  browserSessionMode = true;
   csrfToken = body.csrf_token || "";
+  if (body.authenticated) {
+    // Clear any stale development token. The server checks a bearer token BEFORE the session
+    // cookie, so a leftover dev token would make every request fail verification even though
+    // a valid session cookie was attached.
+    setToken("");
+  }
   return body;
 }
 
@@ -206,31 +226,48 @@ export const loginUrl = (returnTo = "/") =>
   `/auth/login?return_to=${encodeURIComponent(returnTo)}`;
 
 export async function logout(): Promise<string> {
-  const response = await fetch("/auth/logout", {
-    method: "POST",
-    credentials: "same-origin",
-    headers: {
-      "Content-Type": "application/json",
-      ...(csrfToken ? { "X-CSRF-Token": csrfToken } : {}),
-    },
-    body: JSON.stringify({}),
-  });
-  const body = await response.json().catch(() => null);
-  csrfToken = "";
-  setToken("");
-  return body?.logout_url || "";
+  // Local state is cleared even when the server call fails. Leaving the CSRF token and any
+  // development token in place after a failed logout would let the next request look
+  // authenticated on this page while the server still holds a live session.
+  let url = "";
+  try {
+    const response = await fetch("/auth/logout", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: {
+        "Content-Type": "application/json",
+        ...(csrfToken ? { "X-CSRF-Token": csrfToken } : {}),
+      },
+      body: JSON.stringify({}),
+    });
+    const body = await response.json().catch(() => null);
+    url = body?.logout_url || "";
+  } finally {
+    csrfToken = "";
+    setToken("");
+  }
+  return url;
 }
 
 export async function api<T>(path: string, init: RequestInit = {}) {
+  // A bearer token is used ONLY when one was explicitly supplied for local development.
+  //
+  // This matters more than it looks. The server checks a bearer token BEFORE the session
+  // cookie, so a stale development token left in sessionStorage would be sent on every
+  // request, fail verification against the issuer, and return 401 — even though a perfectly
+  // good session cookie was attached. The browser would be signed in and still unable to call
+  // anything. So once the browser flow is in use, the local token is cleared rather than
+  // raced against the cookie.
+  const localToken = browserSessionMode ? "" : getToken();
   const response = await fetch(`/api/v1${path}`, {
     ...init,
     credentials: "same-origin",
     headers: {
       "Content-Type": "application/json",
-      ...(getToken() ? { Authorization: `Bearer ${getToken()}` } : {}),
+      ...(localToken ? { Authorization: `Bearer ${localToken}` } : {}),
       // Sent only when a session cookie is in play; an explicit bearer token needs no CSRF
       // proof because the browser never attaches one by itself.
-      ...(!getToken() && csrfToken ? { "X-CSRF-Token": csrfToken } : {}),
+      ...(!localToken && csrfToken ? { "X-CSRF-Token": csrfToken } : {}),
       ...(init.headers || {}),
     },
   });

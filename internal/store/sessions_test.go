@@ -62,14 +62,43 @@ func TestLoginTransactionRejectsUnknownAndExpired(t *testing.T) {
 	}
 }
 
+// issueLinkedSession creates the identity link AND the session it authorises, for the EXACT
+// subject given.
+//
+// The subject is not uniquified here on purpose: a test that proves revocation by identity
+// needs two sessions that share one (issuer, subject), so `RevokeSessionsForIdentity` has
+// something real to match. Callers that only need "some identity" pass uniqueSubject().
+//
+// The link itself is required because ReadSession refuses a session with no active link row:
+// sessions are only ever minted after a link has resolved, so a fixture that skipped it would
+// force that production rule to be relaxed for a test's convenience.
+func issueLinkedSession(t *testing.T, s *Store, org, principal, issuer, subject, csrf string, ttl time.Duration) string {
+	t.Helper()
+	ctx := context.Background()
+	if err := s.LinkIdentityByAdmin(ctx, org, issuer, subject, principal, "fixture"); err != nil {
+		t.Fatalf("link fixture identity: %v", err)
+	}
+	raw, err := s.CreateSession(ctx, org, principal, issuer, subject, csrf, ttl)
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	return raw
+}
+
+// uniqueSubject returns a subject that cannot collide with a previous run.
+//
+// `identity_links` is UNIQUE on (issuer, subject) PLATFORM-WIDE and the database persists
+// between runs, so a fixed subject is refused on the next run as "already linked to a
+// different principal".
+func uniqueSubject(prefix string) string {
+	return prefix + "-" + platform.NewID()
+}
+
 func TestSessionRoundTripAndRevocation(t *testing.T) {
 	s, org, alice, _ := identityFixture(t)
 	ctx := context.Background()
 
-	raw, err := s.CreateSession(ctx, org, alice, "https://issuer.test", "subject-1", "csrf-1", time.Hour)
-	if err != nil {
-		t.Fatalf("create session: %v", err)
-	}
+	raw := issueLinkedSession(t, s, org, alice, "https://issuer.test", uniqueSubject("subject-round-trip"), "csrf-1", time.Hour)
 	if raw == "" {
 		t.Fatal("no session value was issued")
 	}
@@ -123,10 +152,9 @@ func TestSessionRejectsUnknownAndExpired(t *testing.T) {
 	if _, _, err := s.ReadSession(ctx, platform.NewID()); err == nil {
 		t.Fatal("an unknown session value was accepted")
 	}
-	expired, err := s.CreateSession(ctx, org, alice, "iss", "sub-exp", "c", time.Millisecond)
-	if err != nil {
-		t.Fatal(err)
-	}
+	// Linked, so the ONLY reason this session is refused is its lifetime — without the link the
+	// test would still pass, but for the wrong reason.
+	expired := issueLinkedSession(t, s, org, alice, "iss", uniqueSubject("sub-exp"), "c", time.Millisecond)
 	time.Sleep(30 * time.Millisecond)
 	if _, _, err := s.ReadSession(ctx, expired); err == nil {
 		t.Fatal("an expired session was accepted")
@@ -143,10 +171,7 @@ func TestDeactivatedPrincipalLosesSessionImmediately(t *testing.T) {
 	s, org, alice, _ := identityFixture(t)
 	ctx := context.Background()
 
-	raw, err := s.CreateSession(ctx, org, alice, "iss", "sub-deact", "c", time.Hour)
-	if err != nil {
-		t.Fatal(err)
-	}
+	raw := issueLinkedSession(t, s, org, alice, "iss", uniqueSubject("sub-deact"), "c", time.Hour)
 	if _, _, err := s.ReadSession(ctx, raw); err != nil {
 		t.Fatalf("sanity: session should work before deactivation: %v", err)
 	}
@@ -168,9 +193,9 @@ func TestRevokeSessionsForIdentityAndPrincipal(t *testing.T) {
 	ctx := context.Background()
 
 	iss, sub := "https://issuer.test", platform.NewID()
-	a1, _ := s.CreateSession(ctx, org, alice, iss, sub, "c1", time.Hour)
-	a2, _ := s.CreateSession(ctx, org, alice, iss, sub, "c2", time.Hour)
-	b1, _ := s.CreateSession(ctx, org, bob, "https://other.test", "sub-other", "c3", time.Hour)
+	a1 := issueLinkedSession(t, s, org, alice, iss, sub, "c1", time.Hour)
+	a2 := issueLinkedSession(t, s, org, alice, iss, sub, "c2", time.Hour)
+	b1 := issueLinkedSession(t, s, org, bob, "https://other.test", uniqueSubject("sub-other"), "c3", time.Hour)
 
 	n, err := s.RevokeSessionsForIdentity(ctx, iss, sub)
 	if err != nil {

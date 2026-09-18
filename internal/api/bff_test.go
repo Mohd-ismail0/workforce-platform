@@ -53,13 +53,27 @@ func bffFixture(t *testing.T) (*Server, *store.Store, string, string) {
 	return srv, st, org, who
 }
 
+// issueSession creates the identity link AND the session it authorises.
+//
+// The link is not incidental: ReadSession refuses a session with no active link row, because a
+// session is only ever minted after a link has resolved. A fixture that skipped the link would
+// force that production rule to be relaxed for the convenience of a test.
 func issueSession(t *testing.T, st *store.Store, org, who string) (string, string) {
 	t.Helper()
 	csrf, err := platform.NewOpaqueToken()
 	if err != nil {
 		t.Fatal(err)
 	}
-	raw, err := st.CreateSession(context.Background(), org, who, "iss", "sub", csrf, time.Hour)
+	ctx := context.Background()
+	// The subject is unique per issue. `identity_links` is UNIQUE on (issuer, subject)
+	// PLATFORM-WIDE (that is the invariant preventing one external account becoming two
+	// principals) and the database persists between runs, so a fixed subject would make the
+	// second run fail as "already linked to a different principal".
+	subject := "sub-" + platform.NewID()
+	if err := st.LinkIdentityByAdmin(ctx, org, "iss", subject, who, "fixture"); err != nil {
+		t.Fatalf("link fixture identity: %v", err)
+	}
+	raw, err := st.CreateSession(ctx, org, who, "iss", subject, csrf, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}

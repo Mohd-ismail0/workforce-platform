@@ -80,12 +80,63 @@ func (s *Store) ListIdentityLinks(ctx context.Context, orgID string) ([]Identity
 	return out, rows.Err()
 }
 
-// CountActiveLinksForPrincipal reports how many live external accounts back a principal.
-// Unlinking refuses to remove the last one from an active administrator, which would lock
-// the organization out of its own onboarding surface with no authenticated way back in.
-func (s *Store) CountActiveLinksForPrincipal(ctx context.Context, orgID, principalID string) (int, error) {
+// linkIdentityInTx binds an external identity to a principal INSIDE a caller's transaction.
+//
+// This is the single source of truth for the uniqueness rule, and it takes a transaction so
+// callers can compose it with their own audit write. Two separate transactions would allow a
+// committed change with no record of it, which is exactly what an audit trail must not permit.
+func linkIdentityInTx(ctx context.Context, tx pgx.Tx, orgID, issuer, subject, principalID, createdBy string) error {
+	// The principal must exist here. The foreign key enforces this, but a clear error beats a
+	// constraint violation.
+	var exists bool
+	if err := tx.QueryRow(ctx,
+		`SELECT true FROM principals WHERE org_id = $1 AND id = $2`,
+		orgID, principalID).Scan(&exists); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return errors.New("principal does not exist in this organization")
+		}
+		return err
+	}
+
+	var existing string
+	err := tx.QueryRow(ctx, `
+		SELECT principal_id FROM identity_links WHERE issuer = $1 AND subject = $2`,
+		issuer, subject).Scan(&existing)
+	switch {
+	case err == nil && existing == principalID:
+		// Idempotent: the same binding already exists. Re-activate if it was deactivated, so a
+		// documented re-link is possible and explicit.
+		_, e := tx.Exec(ctx, `
+			UPDATE identity_links SET active = true
+			 WHERE issuer = $1 AND subject = $2 AND NOT active`, issuer, subject)
+		return e
+	case err == nil && existing != principalID:
+		return errors.New("this external account is already linked to a different principal")
+	case !errors.Is(err, pgx.ErrNoRows):
+		return err
+	}
+	_, err = tx.Exec(ctx, `
+		INSERT INTO identity_links (issuer, subject, org_id, principal_id, created_by)
+		VALUES ($1, $2, $3, $4, $5)`,
+		issuer, subject, orgID, principalID, createdBy)
+	return err
+}
+
+// principalInTx reads a principal through a caller's transaction.
+func principalInTx(ctx context.Context, tx pgx.Tx, orgID, principalID string) (platform.Identity, error) {
+	var id platform.Identity
+	err := tx.QueryRow(ctx,
+		`SELECT id, org_id, role, name FROM principals WHERE org_id = $1 AND id = $2 AND active`,
+		orgID, principalID).Scan(&id.ID, &id.OrgID, &id.Role, &id.Name)
+	return id, err
+}
+
+// countActiveLinksInTx counts live external accounts for one principal inside a transaction.
+// Unlinking refuses to remove the last one from an active administrator, which would lock the
+// organization out of its own onboarding surface with no authenticated way back in.
+func countActiveLinksInTx(ctx context.Context, tx pgx.Tx, orgID, principalID string) (int, error) {
 	var n int
-	err := s.Pool.QueryRow(ctx, `
+	err := tx.QueryRow(ctx, `
 		SELECT count(*) FROM identity_links
 		 WHERE org_id = $1 AND principal_id = $2 AND active`,
 		orgID, principalID).Scan(&n)
@@ -95,20 +146,24 @@ func (s *Store) CountActiveLinksForPrincipal(ctx context.Context, orgID, princip
 // LinkIdentityByAdmin binds an external account to a principal, with an audit record.
 //
 // Authority is NOT evaluated here: the caller is responsible for having resolved the
-// requesting administrator from the database. This function only enforces the data
-// invariants (the principal exists in this org; one subject maps to exactly one principal).
+// requesting administrator from the database. This function enforces the data invariants and
+// commits the change and its audit record together.
 func (s *Store) LinkIdentityByAdmin(ctx context.Context, orgID, issuer, subject, principalID, actor string) error {
-	if err := s.LinkOIDCIdentity(ctx, orgID, issuer, subject, principalID, actor); err != nil {
-		return err
+	if orgID == "" || issuer == "" || subject == "" || principalID == "" || actor == "" {
+		return errors.New("org, issuer, subject, principal and actor are required")
 	}
 	return s.WithOrg(ctx, orgID, func(tx pgx.Tx) error {
+		if err := linkIdentityInTx(ctx, tx, orgID, issuer, subject, principalID, actor); err != nil {
+			return err
+		}
 		return auditTx(ctx, tx, orgID, principalID, "identity_link.created", actor, map[string]any{
 			"issuer": issuer, "subject": subject, "principal_id": principalID,
 		})
 	})
 }
 
-// UnlinkIdentityByAdmin removes a mapping, ends the sessions it authorised, and records it.
+// UnlinkIdentityByAdmin removes a mapping, ends the sessions it authorised, and records it —
+// all in ONE transaction.
 //
 // Two halves, and neither is optional:
 //
@@ -116,52 +171,59 @@ func (s *Store) LinkIdentityByAdmin(ctx context.Context, orgID, issuer, subject,
 //     mapped here and re-linking stays an explicit act.
 //  2. Revoke the sessions that link created. The link is what made those sessions valid, so
 //     leaving them live would mean "access removed" did not remove access. ReadSession also
-//     re-checks the link on every request, which covers links removed by any other path;
-//     this call is what gives the operator immediate, observable effect.
+//     re-checks the link on every request, which covers removal by any other path; this call
+//     is what gives the operator immediate, observable effect.
 func (s *Store) UnlinkIdentityByAdmin(ctx context.Context, orgID, issuer, subject, actor string) (int64, error) {
 	if orgID == "" || issuer == "" || subject == "" || actor == "" {
 		return 0, errors.New("org, issuer, subject and actor are required")
 	}
-	// Refuse to strip the last live link from an active administrator: that would remove
-	// the organization's only authenticated path into onboarding, with no way back.
-	var principalID string
-	if err := s.Pool.QueryRow(ctx, `
-		SELECT principal_id FROM identity_links
-		 WHERE org_id = $1 AND issuer = $2 AND subject = $3 AND active`,
-		orgID, issuer, subject).Scan(&principalID); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return 0, errors.New("no active link found for this external account in this organization")
+	var revoked int64
+	err := s.WithOrg(ctx, orgID, func(tx pgx.Tx) error {
+		var principalID string
+		if err := tx.QueryRow(ctx, `
+			SELECT principal_id FROM identity_links
+			 WHERE org_id = $1 AND issuer = $2 AND subject = $3 AND active`,
+			orgID, issuer, subject).Scan(&principalID); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return errors.New("no active link found for this external account in this organization")
+			}
+			return err
 		}
-		return 0, err
-	}
-	// Read the principal through the TENANT-SCOPED path. A direct pool query on `principals`
-	// would run with no `app.org_id` set, so forced RLS would match ZERO rows and this would
-	// fail as if the principal did not exist — including for a principal that is right there.
-	principal, err := s.ResolveIdentity(ctx, platform.Identity{OrgID: orgID, ID: principalID})
-	if err != nil {
-		return 0, err
-	}
-	n, err := s.CountActiveLinksForPrincipal(ctx, orgID, principalID)
-	if err != nil {
-		return 0, err
-	}
-	if principal.Role == "admin" && n <= 1 {
-		return 0, errors.New("refusing to unlink the last external account of an active administrator")
-	}
+		// Read the principal inside this transaction. A pool query here would run with no
+		// app.org_id set, so forced RLS would match ZERO rows and this would fail as if the
+		// principal did not exist — including for a principal that is right there.
+		principal, err := principalInTx(ctx, tx, orgID, principalID)
+		if err != nil {
+			return err
+		}
+		n, err := countActiveLinksInTx(ctx, tx, orgID, principalID)
+		if err != nil {
+			return err
+		}
+		if principal.Role == "admin" && n <= 1 {
+			return errors.New("refusing to unlink the last external account of an active administrator")
+		}
 
-	if err := s.UnlinkOIDCIdentity(ctx, orgID, issuer, subject); err != nil {
-		return 0, err
-	}
-	revoked, err := s.RevokeSessionsForIdentity(ctx, issuer, subject)
-	if err != nil {
-		return 0, err
-	}
-	if err := s.WithOrg(ctx, orgID, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `
+			UPDATE identity_links SET active = false
+			 WHERE org_id = $1 AND issuer = $2 AND subject = $3 AND active`,
+			orgID, issuer, subject); err != nil {
+			return err
+		}
+		// sessions carries no tenant RLS policy, so this is valid inside the org transaction.
+		tag, err := tx.Exec(ctx, `
+			UPDATE sessions SET revoked_at = clock_timestamp()
+			 WHERE issuer = $1 AND subject = $2 AND revoked_at IS NULL`, issuer, subject)
+		if err != nil {
+			return err
+		}
+		revoked = tag.RowsAffected()
 		return auditTx(ctx, tx, orgID, principalID, "identity_link.revoked", actor, map[string]any{
 			"issuer": issuer, "subject": subject, "principal_id": principalID,
 			"sessions_revoked": revoked,
 		})
-	}); err != nil {
+	})
+	if err != nil {
 		return 0, err
 	}
 	return revoked, nil
@@ -252,6 +314,17 @@ func (s *Store) BootstrapIdentity(ctx context.Context, q BootstrapRequest) (Boot
 			res.PrincipalCreated = true
 		}
 
+		// The link is created in the SAME transaction as the organization and principal.
+		//
+		// An earlier revision linked in a second transaction, which allowed a committed
+		// half-built onboarding: the org and principal would persist while the link was
+		// refused (because the subject already maps to another principal), leaving an
+		// administrator that cannot sign in and no record explaining why.
+		if err := linkIdentityInTx(ctx, tx, q.OrgID, q.Issuer, q.Subject, q.PrincipalID, q.Actor); err != nil {
+			return err
+		}
+		res.Linked = true
+
 		return auditTx(ctx, tx, q.OrgID, q.PrincipalID, "identity.bootstrap", q.Actor, map[string]any{
 			"org_id": q.OrgID, "principal_id": q.PrincipalID, "issuer": q.Issuer, "subject": q.Subject,
 			"org_created": res.OrgCreated, "principal_created": res.PrincipalCreated,
@@ -260,11 +333,5 @@ func (s *Store) BootstrapIdentity(ctx context.Context, q BootstrapRequest) (Boot
 	if err != nil {
 		return res, err
 	}
-	// LinkOIDCIdentity owns the uniqueness semantics (one subject -> one principal,
-	// platform-wide), so the bootstrap reuses it rather than restating the rule.
-	if err := s.LinkOIDCIdentity(ctx, q.OrgID, q.Issuer, q.Subject, q.PrincipalID, q.Actor); err != nil {
-		return res, err
-	}
-	res.Linked = true
 	return res, nil
 }
