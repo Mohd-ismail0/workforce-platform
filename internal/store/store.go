@@ -146,7 +146,32 @@ type Handoff struct {
 	Summary     string `json:"summary"`
 	State       string `json:"state"`
 	CreatedAt   string `json:"created_at"`
+	// ExpiresAt is when an unanswered offer stops being actionable. Empty when
+	// the offer carries no expiry.
+	ExpiresAt string `json:"expires_at"`
+	// ResolvedAt is set when the offer stops being open (accepted, declined,
+	// expired or cancelled).
+	ResolvedAt string `json:"resolved_at"`
+	// Reason carries whichever note is current: the clarification question, the
+	// decline reason or the withdrawal reason.
+	Reason string `json:"reason"`
+	// HopDepth is the accountability-transfer depth of this offer.
+	HopDepth int `json:"hop_depth"`
 }
+
+// Handoff lifecycle policy.
+const (
+	// DefaultHandoffTTL bounds how long an unanswered offer stays actionable.
+	// An offer nobody answers must expire rather than sit forever.
+	DefaultHandoffTTL = 7 * 24 * time.Hour
+	// maxHandoffHops bounds accountability ping-pong for one task. Endless
+	// transfer is not collaboration; it launders responsibility.
+	maxHandoffHops = 5
+)
+
+// openHandoffStates are the states in which a recipient may still reply
+// (accept, decline or clarify) and a creator may still withdraw.
+var openHandoffStates = "'offered','clarification_requested'"
 type Record struct {
 	ID          string         `json:"id"`
 	Integration string         `json:"integration"`
@@ -586,7 +611,16 @@ func (s *Store) ListRecords(ctx context.Context, org, integration string) ([]Rec
 	})
 	return out, e
 }
+// CreateHandoff offers responsibility for a task to another active principal.
+// The offer carries a bounded lifetime (DefaultHandoffTTL); see createHandoff
+// for the explicit-expiry form.
 func (s *Store) CreateHandoff(ctx context.Context, org, task, actor, recipient, role, summary string) (Handoff, error) {
+	return s.createHandoff(ctx, org, task, actor, recipient, role, summary, time.Now().Add(DefaultHandoffTTL))
+}
+
+// createHandoff is the explicit-expiry form. Expiry is a parameter so the
+// behaviour can be exercised without waiting for wall-clock time to pass.
+func (s *Store) createHandoff(ctx context.Context, org, task, actor, recipient, role, summary string, expiresAt time.Time) (Handoff, error) {
 	var x Handoff
 	var t time.Time
 	e := s.WithOrg(ctx, org, func(tx pgx.Tx) error {
@@ -605,14 +639,55 @@ func (s *Store) CreateHandoff(ctx context.Context, org, task, actor, recipient, 
 		if e := tx.QueryRow(ctx, "select active from principals where org_id=$1 and id=$2", org, recipient).Scan(&active); e != nil || !active {
 			return errors.New("recipient inactive")
 		}
+		// Accountability transfer is bounded. Count transfers already ACCEPTED
+		// for this task (an offer that was never taken up did not move
+		// responsibility anywhere), and refuse to extend the chain past the cap.
+		// Only transfers of ownership count: re-assigning the executor is a
+		// different act and does not launder accountability.
+		var hops int
+		if role == "owner" {
+			if e := tx.QueryRow(ctx, "select count(*) from handoffs where org_id=$1 and task_id=$2 and role='owner' and state='accepted'", org, task).Scan(&hops); e != nil {
+				return e
+			}
+			if hops >= maxHandoffHops {
+				return errors.New("handoff hop limit reached")
+			}
+		}
 		id := platform.NewID()
-		return tx.QueryRow(ctx, "insert into handoffs(id,org_id,task_id,offered_task_version,recipient_id,role,summary,created_by) values($1,$2,$3,$4,$5,$6,$7,$8) returning id,task_id,recipient_id,role,summary,state,created_at", id, org, task, v, recipient, role, summary, actor).Scan(&x.ID, &x.TaskID, &x.RecipientID, &x.Role, &x.Summary, &x.State, &t)
+		var exp *time.Time
+		if e := tx.QueryRow(ctx,
+			`insert into handoffs(id,org_id,task_id,offered_task_version,recipient_id,role,summary,created_by,expires_at,hop_depth)
+			 values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+			 returning id,task_id,recipient_id,role,summary,state,created_at,expires_at,reason,hop_depth`,
+			id, org, task, v, recipient, role, summary, actor, expiresAt, hops+1,
+		).Scan(&x.ID, &x.TaskID, &x.RecipientID, &x.Role, &x.Summary, &x.State, &t, &exp, &x.Reason, &x.HopDepth); e != nil {
+			return e
+		}
+		x.ExpiresAt = scanTime(exp)
+		return nil
 	})
 	x.CreatedAt = scanTime(&t)
 	return x, e
 }
+
+// expireDueHandoffs marks every open offer whose lifetime has passed as
+// expired. Expiry is enforced in SQL against the database clock so it does not
+// depend on anyone opening a page, and it is idempotent.
+func expireDueHandoffs(ctx context.Context, tx pgx.Tx, org, id string) error {
+	_, e := tx.Exec(ctx,
+		`update handoffs set state='expired', resolved_at=clock_timestamp()
+		 where org_id=$1 and id=$2 and state in ('offered','clarification_requested')
+		   and expires_at is not null and expires_at <= clock_timestamp()`, org, id)
+	return e
+}
+
+// AcceptHandoff accepts an offered responsibility. The offer must still be open,
+// must not have expired, and must not have moved since it was made.
 func (s *Store) AcceptHandoff(ctx context.Context, org, id, actor string) error {
 	return s.WithOrg(ctx, org, func(tx pgx.Tx) error {
+		if e := expireDueHandoffs(ctx, tx, org, id); e != nil {
+			return e
+		}
 		var task, role, state, source string
 		var offered int64
 		if e := tx.QueryRow(ctx, "select task_id,role,state,created_by,offered_task_version from handoffs where org_id=$1 and id=$2 and recipient_id=$3 for update", org, id, actor).Scan(&task, &role, &state, &source, &offered); e != nil {
@@ -621,7 +696,7 @@ func (s *Store) AcceptHandoff(ctx context.Context, org, id, actor string) error 
 		if state == "accepted" {
 			return nil
 		}
-		if state != "offered" {
+		if state != "offered" && state != "clarification_requested" {
 			return errors.New("handoff unavailable")
 		}
 		var owner, assignee string
@@ -629,6 +704,8 @@ func (s *Store) AcceptHandoff(ctx context.Context, org, id, actor string) error 
 		if e := tx.QueryRow(ctx, "select owner_id,coalesce(assignee_id,''),version from tasks where org_id=$1 and id=$2 for update", org, task).Scan(&owner, &assignee, &version); e != nil {
 			return e
 		}
+		// A handoff made against one version of the task must not be accepted
+		// after the task changed underneath it.
 		if source != owner || version != offered {
 			return errors.New("stale handoff")
 		}
@@ -641,7 +718,79 @@ func (s *Store) AcceptHandoff(ctx context.Context, org, id, actor string) error 
 		if _, e := tx.Exec(ctx, q, actor, org, task); e != nil {
 			return e
 		}
-		_, e := tx.Exec(ctx, "update handoffs set state='accepted',accepted_at=clock_timestamp() where org_id=$1 and id=$2", org, id)
+		_, e := tx.Exec(ctx, "update handoffs set state='accepted',accepted_at=clock_timestamp(),resolved_at=clock_timestamp() where org_id=$1 and id=$2", org, id)
+		return e
+	})
+}
+
+// DeclineHandoff is the recipient's refusal. Only the recipient may decline, and
+// only while the offer is open.
+func (s *Store) DeclineHandoff(ctx context.Context, org, id, actor, reason string) error {
+	return s.recipientResolve(ctx, org, id, actor, "declined", reason)
+}
+
+// ClarifyHandoff is the recipient asking a question instead of guessing. The
+// offer stays open so the creator can answer and the recipient can still accept.
+func (s *Store) ClarifyHandoff(ctx context.Context, org, id, actor, question string) error {
+	return s.WithOrg(ctx, org, func(tx pgx.Tx) error {
+		if e := expireDueHandoffs(ctx, tx, org, id); e != nil {
+			return e
+		}
+		var state, recipient string
+		if e := tx.QueryRow(ctx, "select state,recipient_id from handoffs where org_id=$1 and id=$2 for update", org, id).Scan(&state, &recipient); e != nil {
+			return e
+		}
+		if recipient != actor {
+			return errors.New("only the recipient may ask for clarification")
+		}
+		if state != "offered" && state != "clarification_requested" {
+			return errors.New("handoff unavailable")
+		}
+		_, e := tx.Exec(ctx, "update handoffs set state='clarification_requested',reason=$3 where org_id=$1 and id=$2", org, id, question)
+		return e
+	})
+}
+
+// CancelHandoff is the creator withdrawing their own offer. It is deliberately
+// NOT available to the recipient, who has decline for that.
+func (s *Store) CancelHandoff(ctx context.Context, org, id, actor, reason string) error {
+	return s.WithOrg(ctx, org, func(tx pgx.Tx) error {
+		if e := expireDueHandoffs(ctx, tx, org, id); e != nil {
+			return e
+		}
+		var state, creator string
+		if e := tx.QueryRow(ctx, "select state,created_by from handoffs where org_id=$1 and id=$2 for update", org, id).Scan(&state, &creator); e != nil {
+			return e
+		}
+		if creator != actor {
+			return errors.New("only the creator may cancel a handoff")
+		}
+		if state != "offered" && state != "clarification_requested" {
+			return errors.New("handoff unavailable")
+		}
+		_, e := tx.Exec(ctx, "update handoffs set state='cancelled',resolved_at=clock_timestamp(),reason=$3 where org_id=$1 and id=$2", org, id, reason)
+		return e
+	})
+}
+
+// recipientResolve is the shared path for a recipient ending an offer
+// (currently decline).
+func (s *Store) recipientResolve(ctx context.Context, org, id, actor, target, reason string) error {
+	return s.WithOrg(ctx, org, func(tx pgx.Tx) error {
+		if e := expireDueHandoffs(ctx, tx, org, id); e != nil {
+			return e
+		}
+		var state, recipient string
+		if e := tx.QueryRow(ctx, "select state,recipient_id from handoffs where org_id=$1 and id=$2 for update", org, id).Scan(&state, &recipient); e != nil {
+			return e
+		}
+		if recipient != actor {
+			return errors.New("only the recipient may reply to a handoff")
+		}
+		if state != "offered" && state != "clarification_requested" {
+			return errors.New("handoff unavailable")
+		}
+		_, e := tx.Exec(ctx, "update handoffs set state=$3,resolved_at=clock_timestamp(),reason=$4 where org_id=$1 and id=$2", org, id, target, reason)
 		return e
 	})
 }

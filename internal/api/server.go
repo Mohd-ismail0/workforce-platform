@@ -477,12 +477,57 @@ func (s *Server) routeResource(w http.ResponseWriter, r *http.Request, id platfo
 			return
 		}
 	}
+	if len(p) == 2 && p[0] == "handoffs" && r.Method == "GET" {
+		x, e := s.store.PeekHandoff(ctx, id.OrgID, p[1], id.ID)
+		if e != nil {
+			fail(w, e)
+			return
+		}
+		jsonWrite(w, 200, x)
+		return
+	}
 	if len(p) == 3 && p[0] == "handoffs" && p[2] == "accept" && r.Method == "POST" {
 		if e := s.store.AcceptHandoff(ctx, id.OrgID, p[1], id.ID); e != nil {
 			fail(w, e)
 		} else {
 			jsonWrite(w, 200, map[string]string{"status": "accepted"})
 		}
+		return
+	}
+	// Handoff lifecycle replies. Each reads its own note from the body: the
+	// recipient declines with a reason or asks a question; the creator withdraws
+	// with a reason. Who may take each action is enforced in the store, not here.
+	if len(p) == 3 && p[0] == "handoffs" && r.Method == "POST" &&
+		(p[2] == "decline" || p[2] == "clarify" || p[2] == "cancel") {
+		var q struct {
+			Reason string `json:"reason"`
+		}
+		if decode(r, &q) != nil {
+			failCode(w, 422, "invalid_request", "a reason is required")
+			return
+		}
+		var e error
+		switch p[2] {
+		case "decline":
+			if strings.TrimSpace(q.Reason) == "" {
+				failCode(w, 422, "invalid_request", "a decline reason is required")
+				return
+			}
+			e = s.store.DeclineHandoff(ctx, id.OrgID, p[1], id.ID, q.Reason)
+		case "clarify":
+			if strings.TrimSpace(q.Reason) == "" {
+				failCode(w, 422, "invalid_request", "a clarification question is required")
+				return
+			}
+			e = s.store.ClarifyHandoff(ctx, id.OrgID, p[1], id.ID, q.Reason)
+		case "cancel":
+			e = s.store.CancelHandoff(ctx, id.OrgID, p[1], id.ID, q.Reason)
+		}
+		if e != nil {
+			fail(w, e)
+			return
+		}
+		jsonWrite(w, 200, map[string]string{"status": p[2] + "d"})
 		return
 	}
 	failCode(w, 404, "not_found", "not found")
