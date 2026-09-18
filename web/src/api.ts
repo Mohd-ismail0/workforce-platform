@@ -67,7 +67,74 @@ export type Proposal = {
   summary: string;
   operations: Operation[];
   created_at: string;
+  failure_reason?: string;
 };
+
+/** One record a proposal would change, at the version the proposal was built against. */
+export type Record_ = {
+  id: string;
+  integration: string;
+  version: number;
+  data: Record<string, unknown>;
+};
+
+export const listProposals = () => list<Proposal>("/proposals");
+export const getProposal = (id: string) => api<Proposal>(`/proposals/${id}`);
+export const listRecords = (integration: string) =>
+  list<Record_>(`/integrations/${integration}/records`);
+export const listTasks = () => list<Task>("/tasks");
+export const listProjects = () => list<Project>("/projects");
+export const listDecisions = () => list<Decision>("/decisions");
+export const getTask = (id: string) => api<Task>(`/tasks/${id}`);
+export const listAgents = () => list<Agent>("/agents");
+export const createProject = (body: { name: string; description?: string }) =>
+  api<Project>("/projects", { method: "POST", body: JSON.stringify(body) });
+export const createTask = (body: {
+  title: string;
+  description?: string;
+  project_id?: string;
+  assignee_id?: string;
+}) => api<Task>("/tasks", { method: "POST", body: JSON.stringify(body) });
+
+/** An agent DEFINITION: a template plus the harness it runs on. Not a running process. */
+export type Agent = {
+  id: string;
+  org_id: string;
+  name: string;
+  harness: string;
+  owner_id: string;
+  capabilities: string[] | null;
+  created_at: string;
+};
+
+/**
+ * Decide on a proposal.
+ *
+ * `kind` is endorse | approve | reject. The distinction is the whole authority model: an
+ * endorser confirms "this is the work I asked for", an approver authorises the effect. They are
+ * deliberately different people, and the server enforces that — a requester cannot approve
+ * their own proposal.
+ */
+export type Decision = {
+  id: string;
+  task_id: string;
+  proposal_id: string;
+  revision: number;
+  digest: string;
+  kind: "endorse" | "approve";
+  title: string;
+  status: string;
+};
+
+export const decideProposal = (
+  proposalId: string,
+  kind: "endorse" | "approve" | "reject",
+  body: { revision: number; digest: string; reason?: string },
+) =>
+  api<Proposal>(`/proposals/${proposalId}/${kind}`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
 export type HandoffOffer = {
   id: string;
   task_id: string;

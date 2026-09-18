@@ -1,8 +1,15 @@
 import { defineConfig } from "vitest/config";
 import react from "@vitejs/plugin-react";
+import tailwindcss from "@tailwindcss/vite";
+import { fileURLToPath } from "node:url";
 
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), tailwindcss()],
+  resolve: {
+    // The UI is organised by feature, so imports read as "@/features/inbox/inbox-page"
+    // instead of a chain of ../../.. that breaks whenever a file moves.
+    alias: { "@": fileURLToPath(new URL("./src", import.meta.url)) },
+  },
   server: {
     host: "127.0.0.1",
     proxy: {
@@ -15,5 +22,5 @@ export default defineConfig({
       "/ready": "http://127.0.0.1:8095",
     },
   },
-  test: { environment: "jsdom", setupFiles: [] },
+  test: { environment: "jsdom", setupFiles: ["./src/test-setup.ts"] },
 });

@@ -1,0 +1,107 @@
+@import "tailwindcss";
+
+/*
+ * Design tokens: a dark, dense control room.
+ *
+ * Concrete values rather than a light/dark pair, because this surface is deliberately
+ * single-theme: it is operated for long sessions and every screen is data-dense. There is no
+ * light variant to keep in sync, so there is no token indirection to pay for.
+ *
+ * The palette is near-neutral with a faint green cast, which keeps status colours (amber for
+ * pending, red for refused, cyan for information) clearly readable against it without the
+ * background competing for attention.
+ */
+@theme {
+  --font-sans: "DM Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "DM Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  --color-canvas: #0b0f0e;
+  --color-surface: #111716;
+  --color-raised: #161d1b;
+  --color-line: #212b28;
+  --color-line-strong: #2c3835;
+
+  --color-ink: #e4ebe8;
+  --color-ink-2: #a3b1ac;
+  --color-ink-3: #6e7c78;
+
+  --color-accent: #3bc98d;
+  --color-accent-ink: #04231a;
+  --color-accent-soft: #123027;
+
+  --color-pending: #e0a458;
+  --color-pending-soft: #33260f;
+  --color-danger: #e5705f;
+  --color-danger-soft: #331714;
+  --color-info: #6aa9e0;
+  --color-info-soft: #12283b;
+
+  --radius-panel: 10px;
+}
+
+/*
+ * Dense default type scale. The base is 13px because these screens are read in long sittings
+ * beside the work itself; 16px wastes vertical space and forces more scrolling per decision.
+ */
+@layer base {
+  html {
+    background: var(--color-canvas);
+    color-scheme: dark;
+  }
+  body {
+    margin: 0;
+    background: var(--color-canvas);
+    color: var(--color-ink);
+    font-family: var(--font-sans);
+    font-size: 13px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+  h1,
+  h2,
+  h3,
+  h4 {
+    margin: 0;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+  }
+  /*
+   * Visible focus is not optional here: review and approval are keyboard-driven in practice,
+   * and an invisible focus ring makes the destructive-looking actions unreachable.
+   */
+  :focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 2px;
+  }
+  ::selection {
+    background: var(--color-accent-soft);
+    color: var(--color-ink);
+  }
+  /* Thin scrollbars so long lists stay legible without a heavy chrome band. */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--color-line-strong) transparent;
+  }
+  *::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  *::-webkit-scrollbar-thumb {
+    background: var(--color-line-strong);
+    border-radius: 4px;
+  }
+}
+
+@utility eyebrow {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--color-ink-3);
+}
+
+/* Numbers that must line up when scanned down a column (versions, counts, ages). */
+@utility tabular {
+  font-variant-numeric: tabular-nums;
+}

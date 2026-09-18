@@ -6,8 +6,17 @@ import {
   waitFor,
   cleanup,
 } from "@testing-library/react";
-import { HandoffForms, Login, Registry, Runs, TaskDetail, Gates } from "./main";
-import { setToken } from "./api";
+// These technical screens moved out of the old monolithic main.tsx into the admin console.
+// The imports follow the code rather than the other way round.
+import {
+  Gates,
+  HandoffForms,
+  Login,
+  Registry,
+  Runs,
+  TaskDetail,
+} from "@/features/admin/console";
+import { setToken } from "@/api";
 import React from "react";
 
 const task = {
