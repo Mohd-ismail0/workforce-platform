@@ -1,11 +1,16 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import { FolderKanban, Plus } from "lucide-react";
+import { CheckCircle2, FolderKanban, Plus } from "lucide-react";
 import {
+  completeMilestone,
+  createMilestone,
   createProject,
   createTask,
+  listMilestones,
   listProjects,
   listTasks,
+  setMilestoneForecast,
+  type Milestone,
   type Project,
   type Task,
 } from "@/api";
@@ -18,25 +23,50 @@ import { PageHeader } from "@/app/app-shell";
 /**
  * Projects.
  *
- * A project is a container for work, not a second status system: progress here is derived from
- * the tasks inside it rather than tracked separately, so the two can never disagree.
+ * Two things live here and they are not the same kind of thing.
+ *
+ * A project is a container for work, and its task counts are DERIVED from the tasks inside
+ * rather than tracked separately, so the two can never disagree.
+ *
+ * A milestone is a stated outcome with declared acceptance evidence. It is deliberately not a
+ * "Done" column and not a summary of its tasks: "everything underneath moved" is not the same
+ * as "the outcome was achieved", and a plan that cannot tell those apart stops meaning
+ * anything. Completing one requires evidence to be recorded, and its own prerequisites to be
+ * met.
  */
 export function ProjectsPage() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
+  const [milestones, setMilestones] = useState<Record<string, Milestone[]>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [creating, setCreating] = useState(false);
 
-  const load = () =>
-    Promise.all([listProjects(), listTasks()])
-      .then(([p, t]) => {
-        setProjects(p);
-        setTasks(t);
-        setError("");
-      })
-      .catch((e: Error) => setError(e.message))
-      .finally(() => setLoading(false));
+  const load = async () => {
+    try {
+      const [p, t] = await Promise.all([listProjects(), listTasks()]);
+      setProjects(p);
+      setTasks(t);
+      // One request per project. A milestone list is small and this avoids a
+      // second aggregate endpoint; if a project count ever made this slow it
+      // would become one server-side query.
+      const ms = await Promise.all(
+        p.map(async (proj) => {
+          try {
+            return [proj.id, await listMilestones(proj.id)] as const;
+          } catch {
+            return [proj.id, [] as Milestone[]] as const;
+          }
+        }),
+      );
+      setMilestones(Object.fromEntries(ms));
+      setError("");
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setLoading(false);
+    }
+  };
 
   useEffect(() => {
     void load();
@@ -131,6 +161,12 @@ export function ProjectsPage() {
                         ) : null}
                       </div>
                     ) : null}
+                    <MilestoneList
+                      projectId={p.id}
+                      milestones={milestones[p.id] ?? []}
+                      onChanged={() => void load()}
+                      onError={setError}
+                    />
                   </div>
                   <Badge tone={open.length ? "neutral" : "accent"}>
                     {open.length ? "active" : "complete"}
@@ -305,5 +341,271 @@ function NewTaskForm({
         </div>
       </form>
     </Panel>
+  );
+}
+
+function shortDay(iso: string) {
+  if (!iso) return "";
+  const t = Date.parse(iso);
+  return Number.isFinite(t)
+    ? new Date(t).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })
+    : iso;
+}
+
+/**
+ * Milestones for one project.
+ *
+ * Each one shows its declared acceptance evidence next to its state, because the
+ * point of the evidence is to be checked against the claim. Committed and
+ * forecast dates are shown together so a slip is visible rather than implied —
+ * a plan that hides the difference between a promise and a guess cannot be
+ * trusted about either.
+ */
+function MilestoneList({
+  projectId,
+  milestones,
+  onChanged,
+  onError,
+}: {
+  projectId: string;
+  milestones: Milestone[];
+  onChanged: () => void;
+  onError: (v: string) => void;
+}) {
+  const [adding, setAdding] = useState(false);
+  const [name, setName] = useState("");
+  const [evidence, setEvidence] = useState("");
+  const [committed, setCommitted] = useState("");
+  const [forecast, setForecast] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const submit = async () => {
+    setBusy(true);
+    try {
+      await createMilestone(projectId, {
+        name,
+        acceptance_evidence: evidence,
+        committed_date: committed || undefined,
+        forecast_date: forecast || undefined,
+      });
+      setName("");
+      setEvidence("");
+      setCommitted("");
+      setForecast("");
+      setAdding(false);
+      onChanged();
+    } catch (e) {
+      onError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="mt-3 border-t border-[--color-line] pt-2">
+      <div className="flex items-baseline gap-2">
+        <p className="text-[11px] font-medium">Milestones</p>
+        <span className="text-[10px] text-[--color-ink-3]">
+          outcomes with acceptance evidence, not a summary of the task list
+        </span>
+      </div>
+
+      {milestones.length ? (
+        <div className="mt-1.5 space-y-1.5">
+          {milestones.map((m) => (
+            <MilestoneRow key={m.id} m={m} onChanged={onChanged} onError={onError} />
+          ))}
+        </div>
+      ) : (
+        <p className="mt-1.5 text-[10px] text-[--color-ink-3]">
+          None yet. A milestone states what must be true for the outcome to count
+          as achieved.
+        </p>
+      )}
+
+      {adding ? (
+        <div className="mt-2 grid gap-2 rounded-md border border-[--color-line] p-2.5">
+          <Field label="Outcome">
+            <Input
+              autoFocus
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="Supplier replies sent for every open invoice"
+            />
+          </Field>
+          <Field
+            label="What must be true for this to count as met?"
+            hint="Required. Without it, 'met' can only ever be an assertion."
+          >
+            <Textarea
+              value={evidence}
+              onChange={(e) => setEvidence(e.target.value)}
+              placeholder="All 42 open invoices have a sent reply recorded, and none bounced."
+            />
+          </Field>
+          <div className="grid gap-2 sm:grid-cols-2">
+            <Field label="Committed date" hint="a promise">
+              <Input type="date" value={committed} onChange={(e) => setCommitted(e.target.value)} />
+            </Field>
+            <Field label="Forecast date" hint="a guess, revised freely">
+              <Input type="date" value={forecast} onChange={(e) => setForecast(e.target.value)} />
+            </Field>
+          </div>
+          <div className="flex gap-2">
+            <Button
+              size="sm"
+              variant="accent"
+              disabled={busy || !name.trim() || !evidence.trim()}
+              onClick={() => void submit()}
+            >
+              Add milestone
+            </Button>
+            <Button size="sm" variant="ghost" onClick={() => setAdding(false)}>
+              Cancel
+            </Button>
+          </div>
+        </div>
+      ) : (
+        <Button size="sm" variant="ghost" className="mt-1.5" onClick={() => setAdding(true)}>
+          <Plus className="size-3" />
+          Add milestone
+        </Button>
+      )}
+    </div>
+  );
+}
+
+function MilestoneRow({
+  m,
+  onChanged,
+  onError,
+}: {
+  m: Milestone;
+  onChanged: () => void;
+  onError: (v: string) => void;
+}) {
+  const [recording, setRecording] = useState(false);
+  const [evidence, setEvidence] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const blocked = m.unmet_prerequisites > 0;
+  // A slip is the forecast landing after the promise. Shown, not hidden.
+  const slip =
+    m.committed_date && m.forecast_date && m.forecast_date > m.committed_date;
+
+  const record = async () => {
+    setBusy(true);
+    try {
+      await completeMilestone(m.id, evidence, m.version);
+      setEvidence("");
+      setRecording(false);
+      onChanged();
+    } catch (e) {
+      onError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const revise = async (value: string) => {
+    setBusy(true);
+    try {
+      await setMilestoneForecast(m.id, value);
+      onChanged();
+    } catch (e) {
+      onError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="rounded-md border border-[--color-line] px-2.5 py-2">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-[11px] font-medium">{m.name}</span>
+        <Badge
+          tone={m.status === "met" ? "accent" : m.status === "cancelled" ? "neutral" : "pending"}
+        >
+          {m.status}
+        </Badge>
+        {slip ? <Badge tone="danger">forecast after commitment</Badge> : null}
+        {blocked ? (
+          <Badge tone="info">
+            {m.unmet_prerequisites} prerequisite
+            {m.unmet_prerequisites === 1 ? "" : "s"} unmet
+          </Badge>
+        ) : null}
+      </div>
+
+      <p className="mt-1 text-[10px] text-[--color-ink-3]">
+        Acceptance: {m.acceptance_evidence}
+      </p>
+
+      <div className="mt-1 flex flex-wrap items-center gap-2 text-[10px] text-[--color-ink-3]">
+        {m.committed_date ? <span>committed {shortDay(m.committed_date)}</span> : null}
+        {m.forecast_date ? (
+          <span className={slip ? "text-[--color-danger]" : ""}>
+            forecast {shortDay(m.forecast_date)}
+          </span>
+        ) : null}
+        {m.status === "met" && m.met_at ? <span>met {shortDay(m.met_at)}</span> : null}
+      </div>
+
+      {m.status === "met" && m.met_evidence ? (
+        <p className="mt-1 flex items-start gap-1 text-[10px] text-[--color-ink-2]">
+          <CheckCircle2 className="mt-0.5 size-3 shrink-0 text-[--color-accent]" />
+          <span>Evidence recorded: {m.met_evidence}</span>
+        </p>
+      ) : null}
+
+      {m.status !== "met" && m.status !== "cancelled" ? (
+        recording ? (
+          <div className="mt-2 grid gap-2">
+            <Textarea
+              autoFocus
+              value={evidence}
+              onChange={(e) => setEvidence(e.target.value)}
+              placeholder="What evidence shows this outcome was achieved?"
+            />
+            <div className="flex gap-2">
+              <Button
+                size="sm"
+                variant="accent"
+                disabled={busy || !evidence.trim()}
+                onClick={() => void record()}
+              >
+                Record as met
+              </Button>
+              <Button size="sm" variant="ghost" onClick={() => setRecording(false)}>
+                Cancel
+              </Button>
+            </div>
+          </div>
+        ) : (
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={busy || blocked}
+              onClick={() => setRecording(true)}
+            >
+              Record as met
+            </Button>
+            <Input
+              type="date"
+              className="max-w-[9.5rem]"
+              disabled={busy}
+              onChange={(e) => e.target.value && void revise(e.target.value)}
+              title="Revise the forecast. The commitment is not moved by this."
+            />
+            {blocked ? (
+              <span className="text-[10px] text-[--color-ink-3]">
+                cannot be met until its prerequisites are met
+              </span>
+            ) : null}
+          </div>
+        )
+      ) : null}
+    </div>
   );
 }

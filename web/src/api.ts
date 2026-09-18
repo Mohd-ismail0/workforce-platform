@@ -456,6 +456,59 @@ export type AgentBoard = {
 export const getAgentBoard = (agentId: string) =>
   api<AgentBoard>(`/agents/${agentId}/board`);
 export const listPositions = () => list<Position>("/positions");
+
+/**
+ * A stated outcome on a project, with the evidence required to call it met.
+ * `committed_date` is a promise and `forecast_date` a guess held separately, so
+ * revising the guess does not silently rewrite what was promised.
+ */
+export type Milestone = {
+  id: string;
+  project_id: string;
+  name: string;
+  acceptance_evidence: string;
+  committed_date: string;
+  forecast_date: string;
+  status: "planned" | "active" | "met" | "cancelled";
+  met_at: string;
+  met_evidence: string;
+  version: number;
+  created_at: string;
+  /** Prerequisite milestones not yet met: why this is not ready to be met. */
+  unmet_prerequisites: number;
+};
+export const listMilestones = (projectId: string) =>
+  list<Milestone>(`/projects/${projectId}/milestones`);
+export const createMilestone = (
+  projectId: string,
+  body: {
+    name: string;
+    acceptance_evidence: string;
+    committed_date?: string;
+    forecast_date?: string;
+  },
+) =>
+  api<Milestone>(`/projects/${projectId}/milestones`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+/** A milestone is met on recorded evidence, and only after its prerequisites. */
+export const completeMilestone = (id: string, evidence: string, version: number) =>
+  api<{ status: string }>(`/milestones/${id}/complete`, {
+    method: "POST",
+    body: JSON.stringify({ evidence, version }),
+  });
+export const setMilestoneForecast = (id: string, forecastDate: string) =>
+  api<Milestone>(`/milestones/${id}/forecast`, {
+    method: "POST",
+    body: JSON.stringify({ forecast_date: forecastDate }),
+  });
+export const addMilestoneDependency = (id: string, parentId: string) =>
+  api<{ status: string }>(`/milestones/${id}/dependencies`, {
+    method: "POST",
+    body: JSON.stringify({ parent_id: parentId }),
+  });
+
 export const createPosition = (body: { name: string; parent_id?: string }) =>
   api<Position>("/positions", { method: "POST", body: JSON.stringify(body) });
 /** Structure is a question with a time in it; omit `asOf` for "now". */

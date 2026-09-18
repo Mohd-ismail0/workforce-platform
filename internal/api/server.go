@@ -555,6 +555,96 @@ func (s *Server) routeResource(w http.ResponseWriter, r *http.Request, id platfo
 			return
 		}
 	}
+	// Milestones: planning that is separate from doing.
+	if len(p) == 3 && p[0] == "projects" && p[2] == "milestones" {
+		switch r.Method {
+		case "GET":
+			x, e := s.store.ListMilestones(ctx, id.OrgID, p[1])
+			respond(w, x, e)
+			return
+		case "POST":
+			var q struct {
+				Name               string `json:"name"`
+				AcceptanceEvidence string `json:"acceptance_evidence"`
+				CommittedDate      string `json:"committed_date"`
+				ForecastDate       string `json:"forecast_date"`
+			}
+			if decode(r, &q) != nil {
+				failCode(w, 422, "invalid_request", "a request body is required")
+				return
+			}
+			// Required fields are a validation failure (422), not a conflict: the
+			// request is malformed, not in tension with current state.
+			if strings.TrimSpace(q.Name) == "" || strings.TrimSpace(q.AcceptanceEvidence) == "" {
+				failCode(w, 422, "invalid_request", "name and acceptance_evidence are required")
+				return
+			}
+			committed, ok := parseDay(w, q.CommittedDate)
+			if !ok {
+				return
+			}
+			forecast, ok := parseDay(w, q.ForecastDate)
+			if !ok {
+				return
+			}
+			x, e := s.store.CreateMilestone(ctx, id.OrgID, id.ID, p[1], q.Name, q.AcceptanceEvidence, committed, forecast)
+			if e != nil {
+				fail(w, e)
+				return
+			}
+			jsonWrite(w, 201, x)
+			return
+		}
+	}
+	if len(p) == 3 && p[0] == "milestones" && r.Method == "POST" {
+		switch p[2] {
+		case "complete":
+			var q struct {
+				Evidence string `json:"evidence"`
+				Version  int64  `json:"version"`
+			}
+			if decode(r, &q) != nil || strings.TrimSpace(q.Evidence) == "" {
+				failCode(w, 422, "invalid_request", "evidence and version are required")
+				return
+			}
+			if e := s.store.CompleteMilestone(ctx, id.OrgID, id.ID, p[1], q.Evidence, q.Version); e != nil {
+				fail(w, e)
+				return
+			}
+			jsonWrite(w, 200, map[string]string{"status": "met"})
+			return
+		case "forecast":
+			var q struct {
+				ForecastDate string `json:"forecast_date"`
+			}
+			_ = decode(r, &q)
+			forecast, ok := parseDay(w, q.ForecastDate)
+			if !ok {
+				return
+			}
+			x, e := s.store.SetMilestoneForecast(ctx, id.OrgID, id.ID, p[1], forecast)
+			if e != nil {
+				fail(w, e)
+				return
+			}
+			jsonWrite(w, 200, x)
+			return
+		case "dependencies":
+			var q struct {
+				ParentID string `json:"parent_id"`
+			}
+			if decode(r, &q) != nil || q.ParentID == "" {
+				failCode(w, 422, "invalid_request", "parent_id is required")
+				return
+			}
+			if e := s.store.AddMilestoneDependency(ctx, id.OrgID, p[1], q.ParentID); e != nil {
+				fail(w, e)
+				return
+			}
+			jsonWrite(w, 201, map[string]string{"status": "linked"})
+			return
+		}
+	}
 	if len(p) == 3 && p[0] == "agents" && p[2] == "board" && r.Method == "GET" {
 		// One agent's current state: what it is reasoning about, what is queued,
 		// and what is parked waiting on a person. Terminal runs are omitted.
@@ -672,4 +762,19 @@ func safeMessage(e error) string {
 }
 func failCode(w http.ResponseWriter, status int, code, msg string) {
 	jsonWrite(w, status, map[string]any{"error": map[string]string{"code": code, "message": msg}})
+}
+
+// parseDay reads a calendar date (YYYY-MM-DD); empty means "not set". A bad
+// value is refused rather than silently dropped, because a plan that quietly
+// loses a date is worse than one that says the date was unreadable.
+func parseDay(w http.ResponseWriter, raw string) (*time.Time, bool) {
+	if strings.TrimSpace(raw) == "" {
+		return nil, true
+	}
+	t, e := time.Parse("2006-01-02", strings.TrimSpace(raw))
+	if e != nil {
+		failCode(w, 422, "invalid_request", "dates must be YYYY-MM-DD")
+		return nil, false
+	}
+	return &t, true
 }
