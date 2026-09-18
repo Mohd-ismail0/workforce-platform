@@ -555,6 +555,17 @@ func (s *Server) routeResource(w http.ResponseWriter, r *http.Request, id platfo
 			return
 		}
 	}
+	if len(p) == 3 && p[0] == "agents" && p[2] == "board" && r.Method == "GET" {
+		// One agent's current state: what it is reasoning about, what is queued,
+		// and what is parked waiting on a person. Terminal runs are omitted.
+		x, e := s.store.AgentBoard(ctx, id.OrgID, p[1])
+		if e != nil {
+			fail(w, e)
+			return
+		}
+		jsonWrite(w, 200, x)
+		return
+	}
 	if len(p) == 3 && p[0] == "relationships" && p[2] == "end" && r.Method == "POST" {
 		var q struct {
 			At string `json:"at"`

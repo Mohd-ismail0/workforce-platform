@@ -439,6 +439,22 @@ export type WorkBoardItem = {
 };
 /** The caller's own board, projected server-side from the authenticated identity. */
 export const listWorkBoard = () => list<WorkBoardItem>("/work/board");
+
+/**
+ * What one agent is actually doing. `active` is true only when it is reasoning
+ * right now: a parked run is waiting on a person, which is not activity.
+ */
+export type AgentBoard = {
+  agent: Agent;
+  running: AgentRun[];
+  queued: AgentRun[];
+  parked: AgentRun[];
+  tasks: Task[];
+  open_gates: Gate[];
+  active: boolean;
+};
+export const getAgentBoard = (agentId: string) =>
+  api<AgentBoard>(`/agents/${agentId}/board`);
 export const listPositions = () => list<Position>("/positions");
 export const createPosition = (body: { name: string; parent_id?: string }) =>
   api<Position>("/positions", { method: "POST", body: JSON.stringify(body) });
