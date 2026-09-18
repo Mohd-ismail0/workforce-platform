@@ -336,6 +336,12 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 	case path == "/handoffs" && r.Method == "GET":
 		x, e := s.store.ListHandoffs(ctx, id.OrgID, id.ID)
 		respond(w, x, e)
+	case path == "/work/board" && r.Method == "GET":
+		// The caller's own board. Identity comes from the authenticated
+		// principal, never from a query parameter, so one person cannot ask for
+		// another's board.
+		x, e := s.store.WorkBoard(ctx, id.OrgID, id.ID)
+		respond(w, x, e)
 	case path == "/people" && r.Method == "GET":
 		x, e := s.store.ListPeople(ctx, id.OrgID)
 		respond(w, x, e)

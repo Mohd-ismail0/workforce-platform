@@ -421,6 +421,24 @@ export type Relationship = {
 };
 
 export const listPeople = () => list<Person>("/people");
+/**
+ * One piece of work as it relates to the signed-in person. `relevance` is WHY it
+ * is on the board — accountable, executing, or an offer not yet answered — which
+ * is what makes the list an account of obligations rather than a pile of tasks.
+ */
+export type WorkBoardItem = {
+  task_id: string;
+  title: string;
+  status: string;
+  version: number;
+  created_at: string;
+  relevance: "accountable" | "executing" | "handoff_offered";
+  blocker_task_id: string;
+  blocker_title: string;
+  blocker_owner_id: string;
+};
+/** The caller's own board, projected server-side from the authenticated identity. */
+export const listWorkBoard = () => list<WorkBoardItem>("/work/board");
 export const listPositions = () => list<Position>("/positions");
 export const createPosition = (body: { name: string; parent_id?: string }) =>
   api<Position>("/positions", { method: "POST", body: JSON.stringify(body) });
