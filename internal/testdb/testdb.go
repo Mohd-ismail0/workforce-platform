@@ -23,6 +23,7 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"path/filepath"
 	"testing"
 
 	"workforce.local/platform/internal/store"
@@ -87,10 +88,43 @@ func provision(ctx context.Context, master, name string) error {
 	if e := createDB(ctx, admin, name); e != nil {
 		return e
 	}
-	if e := store.Migrate(ctx, rewriteDatabase(master, name), "migrations"); e != nil {
+	// `go test` runs with the working directory set to the PACKAGE directory
+	// (internal/api/...), not the repo root, so a relative "migrations" path
+	// would glob an empty directory and leave the fresh database unmigrated
+	// (silently: Glob returns no files, Migrate returns nil, then every test
+	// fails on missing relations). Walk up from the package dir to the repo's
+	// migrations/ directory. This is exactly what the shared-local path never
+	// exercised, which is why CI caught it.
+	migDir, err := findMigrationsDir()
+	if err != nil {
+		return err
+	}
+	if e := store.Migrate(ctx, rewriteDatabase(master, name), migDir); e != nil {
 		return fmt.Errorf("migrate %s: %w", name, e)
 	}
 	return nil
+}
+
+// findMigrationsDir walks up from the current (package) working directory until
+// it finds the repository's migrations/ directory, so migrations apply against
+// the real files regardless of the package that hosts the test.
+func findMigrationsDir() (string, error) {
+	wd, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	dir := wd
+	for {
+		cand := filepath.Join(dir, "migrations")
+		if fi, e := os.Stat(cand); e == nil && fi.IsDir() {
+			return cand, nil
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", fmt.Errorf("migrations/ not found above %s", wd)
+		}
+		dir = parent
+	}
 }
 
 func createDB(ctx context.Context, adminURL, name string) error {
