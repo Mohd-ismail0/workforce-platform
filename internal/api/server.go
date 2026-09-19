@@ -76,6 +76,13 @@ func (s *Server) Handler() http.Handler {
 	m.HandleFunc("/auth/logout", s.handleLogout)
 	m.HandleFunc("/auth/session", s.handleSession)
 	m.HandleFunc("/api/v1/", s.api)
+	// Catch-all last: more specific patterns above win, so the API, the health
+	// probes and the browser identity routes are unaffected. Registered only when
+	// a UI directory is configured, otherwise every unknown path is a plain 404
+	// rather than a confusing "UI not built" page.
+	if s.cfg.UIDir != "" {
+		m.HandleFunc("/", s.serveUI)
+	}
 	return m
 }
 

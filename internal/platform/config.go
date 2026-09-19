@@ -28,6 +28,10 @@ type Config struct {
 	// two have DIFFERENT audiences: OIDC.Audience is the API resource indicator (for bearer
 	// clients), while the ID token's audience is the application client id below.
 	Browser BrowserConfig
+	// UIDir is a directory containing a built single-page app. Empty means the
+	// API serves only the API, which is the correct default: a binary should not
+	// pretend to have a UI it was not given.
+	UIDir string
 }
 
 // BrowserConfig is the confidential backend-for-frontend client.
@@ -99,6 +103,10 @@ func LoadConfig() (Config, error) {
 		return Config{}, fmt.Errorf("unsupported AUTH_MODE %q", mode)
 	}
 	c := Config{AuthMode: mode, Tokens: map[string]Identity{}, DatabaseURL: os.Getenv("DATABASE_URL"), Address: os.Getenv("HTTP_ADDR")}
+	// Optional: serve the built single-page app from this binary's origin. When
+	// set, the API and the UI share ONE origin and one port, which removes the
+	// cross-origin cookie and CSRF gymnastics a separate dev-server origin needs.
+	c.UIDir = strings.TrimSpace(os.Getenv("WORKFORCE_UI_DIR"))
 	if mode == "oidc" {
 		// Bearer verification and the interactive BFF browser flow are both wired. The
 		// issuer may sit behind Cloudflare Access, so the protected service-token headers
