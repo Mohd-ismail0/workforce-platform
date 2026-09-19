@@ -286,21 +286,30 @@ func (s *Store) BootstrapIdentity(ctx context.Context, q BootstrapRequest) (Boot
 	}
 
 	err := s.WithOrg(ctx, q.OrgID, func(tx pgx.Tx) error {
-		var seen bool
-		if err := tx.QueryRow(ctx, `SELECT true FROM organizations WHERE id = $1`, q.OrgID).Scan(&seen); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		// NOTE: two SEPARATE existence flags. A single reused `seen` reads correctly
+		// only by accident: if the organization exists, `seen` is true, and a
+		// subsequent Scan that finds no principal returns ErrNoRows WITHOUT
+		// overwriting the destination — leaving a stale `true` that makes the code
+		// take the "principal already exists" branch and skip the insert entirely.
+		// The visible symptom was "principal does not exist in this organization"
+		// when onboarding any principal into an organization that already existed,
+		// which is every principal after the first.
+		var orgSeen bool
+		if err := tx.QueryRow(ctx, `SELECT true FROM organizations WHERE id = $1`, q.OrgID).Scan(&orgSeen); err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			return err
 		}
-		if !seen {
+		if !orgSeen {
 			if _, err := tx.Exec(ctx, `INSERT INTO organizations(id, name) VALUES ($1, $2)`, q.OrgID, q.OrgName); err != nil {
 				return err
 			}
 			res.OrgCreated = true
 		}
 
-		if err := tx.QueryRow(ctx, `SELECT true FROM principals WHERE org_id = $1 AND id = $2`, q.OrgID, q.PrincipalID).Scan(&seen); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		var principalSeen bool
+		if err := tx.QueryRow(ctx, `SELECT true FROM principals WHERE org_id = $1 AND id = $2`, q.OrgID, q.PrincipalID).Scan(&principalSeen); err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			return err
 		}
-		if seen {
+		if principalSeen {
 			// Re-activate but do not rewrite the role: an operator bootstrap must not become
 			// a quiet privilege change on a principal that already exists.
 			if _, err := tx.Exec(ctx, `UPDATE principals SET active = true WHERE org_id = $1 AND id = $2`, q.OrgID, q.PrincipalID); err != nil {
