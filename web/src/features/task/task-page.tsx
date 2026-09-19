@@ -9,8 +9,10 @@ import {
   getTask,
   listGates,
   listHandoffs,
+  listIntegrations,
   listProposals,
   listRuns,
+  type ConnectorManifest,
   type Gate,
   type HandoffOffer,
   type Proposal,
@@ -48,6 +50,7 @@ export function TaskPage() {
   const [proposals, setProposals] = useState<Proposal[]>([]);
   const [gates, setGates] = useState<Gate[]>([]);
   const [handoffs, setHandoffs] = useState<HandoffOffer[]>([]);
+  const [manifests, setManifests] = useState<ConnectorManifest[]>([]);
   const [runs, setRuns] = useState<Awaited<ReturnType<typeof listRuns>>>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -62,13 +65,15 @@ export function TaskPage() {
       listGates(),
       listHandoffs(),
       listRuns(),
+      listIntegrations().catch(() => [] as ConnectorManifest[]),
     ])
-      .then(([t, p, g, h, r]) => {
+      .then(([t, p, g, h, r, mf]) => {
         setTask(t);
         setProposals(p.filter((x) => x.task_id === id));
         setGates(g.filter((x) => x.task_id === id));
         setHandoffs(h.filter((x) => x.task_id === id));
         setRuns(r.filter((x) => x.task_id === id));
+        setManifests(mf);
         setError("");
       })
       .catch((e: Error) => setError(e.message))
@@ -157,7 +162,7 @@ export function TaskPage() {
           ) : null}
 
           {current ? (
-            <PreparedChange proposal={current} />
+            <PreparedChange proposal={current} manifests={manifests} />
           ) : (
             <Panel>
               <PanelHeader title="Nothing prepared yet" />
@@ -287,7 +292,14 @@ export function TaskPage() {
  * authority is evaluated against that specific request. Showing approve buttons on every
  * surface invites approving from a place that never checked who may approve.
  */
-function PreparedChange({ proposal }: { proposal: Proposal }) {
+function PreparedChange({
+  proposal,
+  manifests,
+}: {
+  proposal: Proposal;
+  /** Connector manifests, so each operation can show its evidenced level. */
+  manifests: ConnectorManifest[];
+}) {
   return (
     <Panel>
       <PanelHeader
@@ -313,7 +325,12 @@ function PreparedChange({ proposal }: { proposal: Proposal }) {
         </div>
         {proposal.operations.map((op, i) => (
           <div key={op.id ?? i} className="space-y-2">
-            <OperationHeading op={op} />
+            <OperationHeading
+              op={op}
+              maturity={manifests
+                .find((m) => m.id === op.integration)
+                ?.maturity?.find((x) => x.action === op.action)}
+            />
             <OperationPreview op={op} />
           </div>
         ))}

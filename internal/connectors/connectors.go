@@ -48,6 +48,71 @@ type Manifest struct {
 	// Fields is the payload schema for this integration's operations. Harness
 	// instruction text is generated from it.
 	Fields []Field `json:"fields,omitempty"`
+	// Maturity is what each action has actually been EVIDENCED to do. It is
+	// per-operation on purpose: a connector is rarely uniformly capable, and a
+	// single flag for the whole integration would let a well-tested read imply a
+	// never-tested write.
+	Maturity []OperationMaturity `json:"maturity,omitempty"`
+}
+
+// Maturity is how far an operation has genuinely been established.
+//
+// The order is deliberate and monotonic: each level claims strictly more than
+// the one before, so a level can only be asserted with evidence for THAT level.
+type Maturity string
+
+const (
+	// MaturityUnsupported is the default for an action with no certification.
+	MaturityUnsupported Maturity = "unsupported"
+	// MaturityReadOnly can observe, and can change nothing.
+	MaturityReadOnly Maturity = "read_only"
+	// MaturityPreparePreview can prepare a change for review, and applies nothing.
+	MaturityPreparePreview Maturity = "prepare_preview"
+	// MaturityGovernedApply can apply through the gateway under an approved
+	// operation. It does not imply the result was independently read back.
+	MaturityGovernedApply Maturity = "governed_apply"
+	// MaturityVerifiedApply includes independent readback of the applied effect.
+	// This is the only level that may be described as verified.
+	MaturityVerifiedApply Maturity = "verified_apply"
+)
+
+// OperationMaturity pairs one action with its evidenced level.
+type OperationMaturity struct {
+	Action   string   `json:"action"`
+	Maturity Maturity `json:"maturity"`
+	// Evidence is what establishes the level. It is REQUIRED: a maturity with no
+	// stated evidence is a claim, and a claim is exactly what certification is
+	// supposed to replace.
+	Evidence string `json:"evidence"`
+}
+
+// MaturityOf reports the certified level for an action. An action with no
+// certification is UNSUPPORTED rather than assumed capable: the safe default for
+// "we have not established this" is "do not".
+func (m Manifest) MaturityOf(action string) OperationMaturity {
+	for _, om := range m.Maturity {
+		if om.Action == action {
+			return om
+		}
+	}
+	return OperationMaturity{Action: action, Maturity: MaturityUnsupported}
+}
+
+// AllMaturities returns every action with its level, including any action the
+// manifest lists but never certified, so the gap is visible rather than absent.
+func (m Manifest) AllMaturities() []OperationMaturity {
+	out := []OperationMaturity{}
+	seen := map[string]bool{}
+	for _, action := range m.Actions {
+		out = append(out, m.MaturityOf(action))
+		seen[action] = true
+	}
+	for _, om := range m.Maturity {
+		if !seen[om.Action] {
+			out = append(out, om)
+		}
+	}
+	return out
 }
 type Connector interface {
 	Manifest() Manifest
@@ -172,6 +237,7 @@ func (inventoryConnector) Manifest() Manifest {
 	return Manifest{
 		ID: "inventory", Name: "Inventory simulator", Kind: "simulator",
 		Actions: []string{"adjust"}, Simulation: true,
+		Maturity: []OperationMaturity{{Action: "adjust", Maturity: MaturityPreparePreview, Evidence: "simulated: the effect is a row in the platform database, and no external provider is contacted"}},
 		Fields: []Field{{Name: "delta", Type: "integer", Required: true,
 			Note: "signed change applied to the record's quantity"}},
 	}
@@ -206,6 +272,7 @@ func (mailConnector) Manifest() Manifest {
 	return Manifest{
 		ID: "mail", Name: "Mail simulator", Kind: "simulator",
 		Actions: []string{"send"}, Simulation: true,
+		Maturity: []OperationMaturity{{Action: "send", Maturity: MaturityPreparePreview, Evidence: "simulated: the effect is a row in the platform database, and no external provider is contacted"}},
 		Fields: []Field{
 			{Name: "recipients", Type: "array of string", Required: true, Note: "at least one address"},
 			{Name: "subject", Type: "string", Required: true},
@@ -249,6 +316,7 @@ func (documentConnector) Manifest() Manifest {
 	return Manifest{
 		ID: "documents", Name: "Documents simulator", Kind: "simulator",
 		Actions: []string{"update"}, Simulation: true,
+		Maturity: []OperationMaturity{{Action: "update", Maturity: MaturityPreparePreview, Evidence: "simulated: the effect is a row in the platform database, and no external provider is contacted"}},
 		Fields: []Field{
 			{Name: "title", Type: "string", Required: false, Note: "supply title and/or content"},
 			{Name: "content", Type: "string", Required: false, Note: "supply title and/or content"},

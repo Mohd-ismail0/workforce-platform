@@ -1,5 +1,5 @@
 import { FileText, Mail, Package } from "lucide-react";
-import type { Operation, Record_ } from "@/api";
+import type { Operation, OperationMaturityEntry, Record_ } from "@/api";
 import { Badge } from "@/components/ui/badge";
 
 /**
@@ -304,7 +304,22 @@ export function OperationPreview({
   );
 }
 
-export function OperationHeading({ op }: { op: Operation }) {
+/** What each evidenced level means, in words a person can act on. */
+const MATURITY_LABEL: Record<string, string> = {
+  unsupported: "not supported",
+  read_only: "read only",
+  prepare_preview: "preview only",
+  governed_apply: "applies on approval",
+  verified_apply: "applies and is verified",
+};
+
+export function OperationHeading({
+  op,
+  maturity,
+}: {
+  op: Operation;
+  maturity?: OperationMaturityEntry;
+}) {
   const Icon = integrationIcon(op.integration);
   return (
     <div className="flex items-center gap-2">
@@ -314,6 +329,23 @@ export function OperationHeading({ op }: { op: Operation }) {
       <span className="text-[12px] font-medium">
         {ACTION_LABEL[op.action] ?? op.action} · {op.integration}
       </span>
+      {/*
+        The evidenced level is shown next to the operation it applies to, because
+        a preview that looks identical whether it applies for real or not is the
+        single most misleading thing this screen could do.
+      */}
+      {maturity ? (
+        <span
+          title={maturity.evidence}
+          className={
+            maturity.maturity === "prepare_preview" || maturity.maturity === "unsupported"
+              ? "rounded border border-[--color-pending]/50 px-1.5 py-0.5 text-[10px] text-[--color-pending]"
+              : "rounded border border-[--color-line-strong] px-1.5 py-0.5 text-[10px] text-[--color-ink-2]"
+          }
+        >
+          {MATURITY_LABEL[maturity.maturity] ?? maturity.maturity}
+        </span>
+      ) : null}
       <span className="ml-auto font-mono text-[10px] text-[--color-ink-3]">
         {op.target_id}
       </span>

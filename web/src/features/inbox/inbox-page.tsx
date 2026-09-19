@@ -13,9 +13,11 @@ import {
   decideProposal,
   getProposal,
   listDecisions,
+  listIntegrations,
   listGates,
   listRecords,
   respondToGate,
+  type ConnectorManifest,
   type Decision,
   type Gate,
   type Proposal,
@@ -68,16 +70,22 @@ const KIND_COPY: Record<
 export function InboxPage() {
   const [gates, setGates] = useState<Gate[]>([]);
   const [decisions, setDecisions] = useState<Decision[]>([]);
+  const [manifests, setManifests] = useState<ConnectorManifest[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
   const [selected, setSelected] = useState<string>();
 
   const load = useCallback(() => {
     setLoading(true);
-    return Promise.all([listGates(), listDecisions()])
-      .then(([g, d]) => {
+    return Promise.all([
+      listGates(),
+      listDecisions(),
+      listIntegrations().catch(() => [] as ConnectorManifest[]),
+    ])
+      .then(([g, d, mf]) => {
         setGates(g);
         setDecisions(d);
+        setManifests(mf);
         setLoadError("");
       })
       .catch((e: Error) => setLoadError(e.message))
@@ -148,6 +156,7 @@ export function InboxPage() {
             {ordered.map((d) => (
               <DecisionCard
                 key={d.id}
+                manifests={manifests}
                 decision={d}
                 expanded={selected === d.id}
                 onToggle={() => setSelected(selected === d.id ? undefined : d.id)}
@@ -232,11 +241,14 @@ function GateCard({ gate, onAnswered }: { gate: Gate; onAnswered: () => void }) 
 
 function DecisionCard({
   decision,
+  manifests,
   expanded,
   onToggle,
   onDecided,
 }: {
   decision: Decision;
+  /** Connector manifests, so each operation can show its evidenced level. */
+  manifests: ConnectorManifest[];
   expanded: boolean;
   onToggle: () => void;
   onDecided: () => void;
@@ -416,7 +428,12 @@ function DecisionCard({
                   <AuthoritativeSummary proposal={proposal} />
                   {proposal.operations.map((op, i) => (
                     <div key={op.id ?? i} className="space-y-2">
-                      <OperationHeading op={op} />
+                      <OperationHeading
+                        op={op}
+                        maturity={manifests.find((m) => m.id === op.integration)?.maturity?.find(
+                          (x) => x.action === op.action,
+                        )}
+                      />
                       <OperationPreview
                         op={op}
                         target={records[`${op.integration}:${op.target_id}`]}

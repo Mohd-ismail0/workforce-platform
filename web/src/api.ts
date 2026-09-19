@@ -80,6 +80,26 @@ export type Record_ = {
 
 export const listProposals = () => list<Proposal>("/proposals");
 export const getProposal = (id: string) => api<Proposal>(`/proposals/${id}`);
+/** How far an operation has actually been EVIDENCED to go. */
+export type OperationMaturityEntry = {
+  action: string;
+  maturity:
+    | "unsupported"
+    | "read_only"
+    | "prepare_preview"
+    | "governed_apply"
+    | "verified_apply";
+  evidence: string;
+};
+export type ConnectorManifest = {
+  id: string;
+  name: string;
+  kind: string;
+  actions: string[];
+  simulation: boolean;
+  maturity?: OperationMaturityEntry[];
+};
+export const listIntegrations = () => list<ConnectorManifest>("/integrations");
 export const listRecords = (integration: string) =>
   list<Record_>(`/integrations/${integration}/records`);
 export const listTasks = () => list<Task>("/tasks");
